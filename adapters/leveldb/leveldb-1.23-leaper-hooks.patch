@@ -1,0 +1,592 @@
+diff --git a/db/db_impl.cc b/db/db_impl.cc
+index 1a4e459..eb355ef 100644
+--- a/db/db_impl.cc
++++ b/db/db_impl.cc
+@@ -144,10 +144,13 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
+       log_(nullptr),
+       seed_(0),
+       tmp_batch_(new WriteBatch),
++      leaper_ops_(this),
+       background_compaction_scheduled_(false),
+       manual_compaction_(nullptr),
+       versions_(new VersionSet(dbname_, &options_, table_cache_,
+-                               &internal_comparator_)) {}
++                               &internal_comparator_)) {
++  if (options_.leaper_hooks != nullptr) options_.leaper_hooks->Bind(&leaper_ops_);
++}
+ 
+ DBImpl::~DBImpl() {
+   // Wait for background work to finish.
+@@ -222,6 +225,55 @@ void DBImpl::MaybeIgnoreError(Status* s) const {
+   }
+ }
+ 
++void DBImpl::LeaperOpsImpl::WarmBlock(uint64_t file_number, uint64_t file_size,
++                                      uint64_t offset, uint64_t size) {
++  db_->table_cache_->WarmBlock(file_number, file_size, offset, size);
++}
++
++void DBImpl::LeaperOpsImpl::EvictBlock(uint64_t file_number, uint64_t file_size,
++                                       uint64_t offset) {
++  db_->table_cache_->EvictBlock(file_number, file_size, offset);
++}
++
++bool DBImpl::LeaperOpsImpl::IsBlockCached(uint64_t file_number,
++                                          uint64_t file_size, uint64_t offset) {
++  return db_->table_cache_->IsBlockCached(file_number, file_size, offset);
++}
++
++void DBImpl::LeaperOpsImpl::ForEachDataBlock(
++    uint64_t file_number, uint64_t file_size,
++    const std::function<void(const LeaperBlockInfo&)>& cb) {
++  db_->table_cache_->ForEachDataBlock(file_number, file_size, cb);
++}
++
++void DBImpl::LeaperCompactionBegin(Compaction* c, bool is_flush) {
++  if (options_.leaper_hooks == nullptr) return;
++  std::vector<LeaperBlockInfo> blocks;
++  std::vector<std::string> key_store;  // backs the Slices in |blocks|
++  if (c != nullptr) {
++    for (int which = 0; which < 2; ++which) {
++      for (int i = 0; i < c->num_input_files(which); ++i) {
++        FileMetaData* f = c->input(which, i);
++        table_cache_->ForEachDataBlock(
++            f->number, f->file_size, [&](const LeaperBlockInfo& b) {
++              key_store.emplace_back(b.smallest_key.data(), b.smallest_key.size());
++              key_store.emplace_back(b.largest_key.data(), b.largest_key.size());
++              blocks.push_back(b);
++            });
++      }
++    }
++  }
++  // The index iterator's key buffers do not outlive the walk, and key_store
++  // reallocates during it, so the Slices are re-pointed at the stable copies
++  // only once the vector has stopped growing.
++  for (size_t i = 0; i < blocks.size(); ++i) {
++    blocks[i].smallest_key = Slice(key_store[2 * i]);
++    blocks[i].largest_key = Slice(key_store[2 * i + 1]);
++  }
++  options_.leaper_hooks->OnCompactionBegin(c != nullptr ? c->level() : 0, is_flush,
++                                           blocks);
++}
++
+ void DBImpl::RemoveObsoleteFiles() {
+   mutex_.AssertHeld();
+ 
+@@ -271,6 +323,15 @@ void DBImpl::RemoveObsoleteFiles() {
+       if (!keep) {
+         files_to_delete.push_back(std::move(filename));
+         if (type == kTableFile) {
++          if (options_.leaper_hooks != nullptr) {
++            // Before the table cache entry is dropped and the file unlinked,
++            // while the blocks are still addressable. LevelDB itself never
++            // reclaims them: the data blocks stay in the block cache under a
++            // cache_id Table::Open will never issue again.
++            uint64_t obsolete_size = 0;
++            env_->GetFileSize(dbname_ + "/" + filename, &obsolete_size);
++            options_.leaper_hooks->OnFileObsolete(number, obsolete_size);
++          }
+           table_cache_->Evict(number);
+         }
+         Log(options_.info_log, "Delete type=%d #%lld\n", static_cast<int>(type),
+@@ -516,7 +577,18 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
+   Status s;
+   {
+     mutex_.Unlock();
++    // A flush is a background operation too: it moves memtable records into a
++    // new SST and invalidates nothing, but its output blocks are exactly the
++    // ones the paper prefetches in a single phase (Section 3.2).
++    LeaperCompactionBegin(nullptr, /*is_flush=*/true);
++    if (options_.leaper_hooks != nullptr) {
++      options_.leaper_hooks->OnOutputFileStart(meta.number);
++    }
+     s = BuildTable(dbname_, env_, options_, table_cache_, iter, &meta);
++    if (options_.leaper_hooks != nullptr) {
++      options_.leaper_hooks->OnOutputFileFinished(meta.number, meta.file_size);
++      options_.leaper_hooks->OnCompactionEnd();
++    }
+     mutex_.Lock();
+   }
+ 
+@@ -813,6 +885,10 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
+     mutex_.Unlock();
+   }
+ 
++  if (options_.leaper_hooks != nullptr) {
++    options_.leaper_hooks->OnOutputFileStart(file_number);
++  }
++
+   // Make the output file
+   std::string fname = TableFileName(dbname_, file_number);
+   Status s = env_->NewWritableFile(fname, &compact->outfile);
+@@ -841,6 +917,9 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
+   }
+   const uint64_t current_bytes = compact->builder->FileSize();
+   compact->current_output()->file_size = current_bytes;
++  if (options_.leaper_hooks != nullptr) {
++    options_.leaper_hooks->OnOutputFileFinished(output_number, current_bytes);
++  }
+   compact->total_bytes += current_bytes;
+   delete compact->builder;
+   compact->builder = nullptr;
+@@ -898,6 +977,8 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
+       compact->compaction->num_input_files(1),
+       compact->compaction->level() + 1);
+ 
++  LeaperCompactionBegin(compact->compaction, /*is_flush=*/false);
++
+   assert(versions_->NumLevelFiles(compact->compaction->level()) > 0);
+   assert(compact->builder == nullptr);
+   assert(compact->outfile == nullptr);
+@@ -1047,6 +1128,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
+   }
+   VersionSet::LevelSummaryStorage tmp;
+   Log(options_.info_log, "compacted to: %s", versions_->LevelSummary(&tmp));
++  if (options_.leaper_hooks != nullptr) options_.leaper_hooks->OnCompactionEnd();
+   return status;
+ }
+ 
+@@ -1114,6 +1196,7 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
+ 
+ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
+                    std::string* value) {
++  if (options_.leaper_hooks != nullptr) options_.leaper_hooks->OnGet(key);
+   Status s;
+   MutexLock l(&mutex_);
+   SequenceNumber snapshot;
+@@ -1197,7 +1280,25 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
+   return DB::Delete(options, key);
+ }
+ 
++namespace {
++// Reports the user keys in a batch to the prefetcher. One extra pass over the
++// batch, only when hooks are installed.
++class LeaperWriteObserver : public WriteBatch::Handler {
++ public:
++  explicit LeaperWriteObserver(LeaperHooks* hooks) : hooks_(hooks) {}
++  void Put(const Slice& key, const Slice&) override { hooks_->OnPut(key); }
++  void Delete(const Slice& key) override { hooks_->OnPut(key); }
++
++ private:
++  LeaperHooks* hooks_;
++};
++}  // namespace
++
+ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
++  if (options_.leaper_hooks != nullptr && updates != nullptr) {
++    LeaperWriteObserver observer(options_.leaper_hooks);
++    updates->Iterate(&observer);
++  }
+   Writer w(&mutex_);
+   w.batch = updates;
+   w.sync = options.sync;
+diff --git a/db/db_impl.h b/db/db_impl.h
+index c7b0172..4bb4c97 100644
+--- a/db/db_impl.h
++++ b/db/db_impl.h
+@@ -15,11 +15,13 @@
+ #include "db/snapshot.h"
+ #include "leveldb/db.h"
+ #include "leveldb/env.h"
++#include "leveldb/leaper_hooks.h"
+ #include "port/port.h"
+ #include "port/thread_annotations.h"
+ 
+ namespace leveldb {
+ 
++class Compaction;
+ class MemTable;
+ class TableCache;
+ class Version;
+@@ -73,6 +75,28 @@ class DBImpl : public DB {
+ 
+  private:
+   friend class DB;
++
++  // Leaper (see leveldb/leaper_hooks.h). Gives the out-of-tree prefetcher the
++  // block-cache operations it cannot reach through the public API.
++  class LeaperOpsImpl : public LeaperEngineOps {
++   public:
++    explicit LeaperOpsImpl(DBImpl* db) : db_(db) {}
++    void WarmBlock(uint64_t file_number, uint64_t file_size, uint64_t offset,
++                   uint64_t size) override;
++    void EvictBlock(uint64_t file_number, uint64_t file_size,
++                    uint64_t offset) override;
++    bool IsBlockCached(uint64_t file_number, uint64_t file_size,
++                       uint64_t offset) override;
++    void ForEachDataBlock(
++        uint64_t file_number, uint64_t file_size,
++        const std::function<void(const LeaperBlockInfo&)>& cb) override;
++
++   private:
++    DBImpl* db_;
++  };
++  LeaperOpsImpl leaper_ops_;
++  void LeaperCompactionBegin(Compaction* c, bool is_flush);
++
+   struct CompactionState;
+   struct Writer;
+ 
+diff --git a/db/table_cache.cc b/db/table_cache.cc
+index 73f05fd..3a9cdd0 100644
+--- a/db/table_cache.cc
++++ b/db/table_cache.cc
+@@ -111,6 +111,44 @@ Status TableCache::Get(const ReadOptions& options, uint64_t file_number,
+   return s;
+ }
+ 
++void TableCache::ForEachDataBlock(
++    uint64_t file_number, uint64_t file_size,
++    const std::function<void(const LeaperBlockInfo&)>& cb) {
++  Cache::Handle* handle = nullptr;
++  if (!FindTable(file_number, file_size, &handle).ok()) return;
++  Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
++  t->ForEachDataBlock(file_number, cb);
++  cache_->Release(handle);
++}
++
++void TableCache::WarmBlock(uint64_t file_number, uint64_t file_size,
++                           uint64_t offset, uint64_t size) {
++  Cache::Handle* handle = nullptr;
++  if (!FindTable(file_number, file_size, &handle).ok()) return;
++  Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
++  t->WarmBlock(offset, size);
++  cache_->Release(handle);
++}
++
++void TableCache::EvictBlock(uint64_t file_number, uint64_t file_size,
++                            uint64_t offset) {
++  Cache::Handle* handle = nullptr;
++  if (!FindTable(file_number, file_size, &handle).ok()) return;
++  Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
++  t->EvictBlock(offset);
++  cache_->Release(handle);
++}
++
++bool TableCache::IsBlockCached(uint64_t file_number, uint64_t file_size,
++                               uint64_t offset) {
++  Cache::Handle* handle = nullptr;
++  if (!FindTable(file_number, file_size, &handle).ok()) return false;
++  Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
++  const bool cached = t->IsBlockCached(offset);
++  cache_->Release(handle);
++  return cached;
++}
++
+ void TableCache::Evict(uint64_t file_number) {
+   char buf[sizeof(file_number)];
+   EncodeFixed64(buf, file_number);
+diff --git a/db/table_cache.h b/db/table_cache.h
+index aac9bfc..fb1ea2b 100644
+--- a/db/table_cache.h
++++ b/db/table_cache.h
+@@ -8,10 +8,12 @@
+ #define STORAGE_LEVELDB_DB_TABLE_CACHE_H_
+ 
+ #include <cstdint>
++#include <functional>
+ #include <string>
+ 
+ #include "db/dbformat.h"
+ #include "leveldb/cache.h"
++#include "leveldb/leaper_hooks.h"
+ #include "leveldb/table.h"
+ #include "port/port.h"
+ 
+@@ -43,6 +45,14 @@ class TableCache {
+   // Evict any entry for the specified file number
+   void Evict(uint64_t file_number);
+ 
++  // --- Leaper support (see leveldb/leaper_hooks.h) ---
++  void ForEachDataBlock(uint64_t file_number, uint64_t file_size,
++                        const std::function<void(const LeaperBlockInfo&)>& cb);
++  void WarmBlock(uint64_t file_number, uint64_t file_size, uint64_t offset,
++                 uint64_t size);
++  void EvictBlock(uint64_t file_number, uint64_t file_size, uint64_t offset);
++  bool IsBlockCached(uint64_t file_number, uint64_t file_size, uint64_t offset);
++
+  private:
+   Status FindTable(uint64_t file_number, uint64_t file_size, Cache::Handle**);
+ 
+diff --git a/include/leveldb/leaper_hooks.h b/include/leveldb/leaper_hooks.h
+new file mode 100644
+index 0000000..b9a044f
+--- /dev/null
++++ b/include/leveldb/leaper_hooks.h
+@@ -0,0 +1,91 @@
++// Copyright (c) 2026 The Leaper Authors. BSD-3-Clause.
++//
++// Extension points for an out-of-tree prefetcher (Leaper, PVLDB 13(11)).
++//
++// LevelDB has no equivalent of RocksDB's EventListener, and a prefetcher needs
++// three things it cannot get from the public API: the user keys flowing
++// through the read/write path, the block layout of the files a compaction
++// touches, and the ability to address block cache entries (whose keys are
++// cache_id || offset, and cache_id is assigned privately in Table::Open).
++//
++// This header adds the smallest surface that supplies those, with a null
++// default so that a build without hooks is byte-for-byte the stock engine.
++
++#ifndef STORAGE_LEVELDB_INCLUDE_LEAPER_HOOKS_H_
++#define STORAGE_LEVELDB_INCLUDE_LEAPER_HOOKS_H_
++
++#include <cstdint>
++#include <functional>
++#include <vector>
++
++#include "leveldb/export.h"
++#include "leveldb/slice.h"
++
++namespace leveldb {
++
++struct LeaperBlockInfo {
++  uint64_t file_number = 0;
++  uint64_t offset = 0;
++  uint64_t size = 0;
++  Slice smallest_key;  // first internal key in the block
++  Slice largest_key;   // last internal key in the block
++};
++
++// Implemented by DBImpl; lets the prefetcher act on the block cache.
++class LEVELDB_EXPORT LeaperEngineOps {
++ public:
++  virtual ~LeaperEngineOps() = default;
++  // Read a block through the normal path with fill_cache on, so it lands in
++  // the block cache under the same cache_id the read path will look it up by.
++  virtual void WarmBlock(uint64_t file_number, uint64_t file_size,
++                         uint64_t offset, uint64_t size) = 0;
++  virtual void EvictBlock(uint64_t file_number, uint64_t file_size,
++                          uint64_t offset) = 0;
++  virtual bool IsBlockCached(uint64_t file_number, uint64_t file_size,
++                             uint64_t offset) = 0;
++  // Walk the index block of an SST, reporting every data block's extent and
++  // key bounds without reading the data blocks themselves.
++  virtual void ForEachDataBlock(
++      uint64_t file_number, uint64_t file_size,
++      const std::function<void(const LeaperBlockInfo&)>& cb) = 0;
++};
++
++class LEVELDB_EXPORT LeaperHooks {
++ public:
++  virtual ~LeaperHooks() = default;
++
++  // Called once when the DB opens.
++  virtual void Bind(LeaperEngineOps* ops) { (void)ops; }
++
++  // Client path. Must be cheap: these run on every operation.
++  virtual void OnGet(const Slice& user_key) { (void)user_key; }
++  virtual void OnPut(const Slice& user_key) { (void)user_key; }
++
++  // Background operations. |inputs| carries the block layout of every input
++  // file, already read from their index blocks.
++  virtual void OnCompactionBegin(int level, bool is_flush,
++                                 const std::vector<LeaperBlockInfo>& inputs) {
++    (void)level; (void)is_flush; (void)inputs;
++  }
++  // A new output file is being opened; subsequent OnOutputBlock calls belong
++  // to it. LevelDB compacts on a single background thread, so no interleaving
++  // is possible.
++  virtual void OnOutputFileStart(uint64_t file_number) { (void)file_number; }
++  // One data block has just been written to the current output file.
++  virtual void OnOutputBlock(const LeaperBlockInfo& block) { (void)block; }
++  // The current output file is complete and installed; its blocks can now be
++  // addressed in the block cache.
++  virtual void OnOutputFileFinished(uint64_t file_number, uint64_t file_size) {
++    (void)file_number; (void)file_size;
++  }
++  // The new version is installed and the inputs are about to be dropped.
++  virtual void OnCompactionEnd() {}
++
++  virtual void OnFileObsolete(uint64_t file_number, uint64_t file_size) {
++    (void)file_number; (void)file_size;
++  }
++};
++
++}  // namespace leveldb
++
++#endif  // STORAGE_LEVELDB_INCLUDE_LEAPER_HOOKS_H_
+diff --git a/include/leveldb/options.h b/include/leveldb/options.h
+index 0f285bc..62d5bd6 100644
+--- a/include/leveldb/options.h
++++ b/include/leveldb/options.h
+@@ -13,6 +13,7 @@ namespace leveldb {
+ 
+ class Cache;
+ class Comparator;
++class LeaperHooks;
+ class Env;
+ class FilterPolicy;
+ class Logger;
+@@ -114,6 +115,10 @@ struct LEVELDB_EXPORT Options {
+   // initially populating a large database.
+   size_t max_file_size = 2 * 1024 * 1024;
+ 
++  // Optional out-of-tree prefetcher (see leveldb/leaper_hooks.h). Not owned.
++  // Leaving this null keeps the engine byte-for-byte stock.
++  LeaperHooks* leaper_hooks = nullptr;
++
+   // Compress blocks using the specified compression algorithm.  This
+   // parameter can be changed dynamically.
+   //
+diff --git a/include/leveldb/table.h b/include/leveldb/table.h
+index a30e903..0c18f8a 100644
+--- a/include/leveldb/table.h
++++ b/include/leveldb/table.h
+@@ -6,9 +6,11 @@
+ #define STORAGE_LEVELDB_INCLUDE_TABLE_H_
+ 
+ #include <cstdint>
++#include <functional>
+ 
+ #include "leveldb/export.h"
+ #include "leveldb/iterator.h"
++#include "leveldb/leaper_hooks.h"
+ 
+ namespace leveldb {
+ 
+@@ -58,6 +60,21 @@ class LEVELDB_EXPORT Table {
+   // be close to the file length.
+   uint64_t ApproximateOffsetOf(const Slice& key) const;
+ 
++  // --- Leaper support (see leveldb/leaper_hooks.h) ---
++  // The block cache key is cache_id || offset, and cache_id is assigned
++  // privately in Open(), so nothing outside Table can address a cached block
++  // without these.
++  uint64_t block_cache_id() const;
++  // Walks the index block, reporting each data block's extent and key bounds.
++  // Reads no data blocks.
++  void ForEachDataBlock(uint64_t file_number,
++                        const std::function<void(const LeaperBlockInfo&)>& cb) const;
++  // Reads a block with fill_cache on, so it lands in the block cache under the
++  // cache_id the read path will look it up by.
++  void WarmBlock(uint64_t offset, uint64_t size);
++  void EvictBlock(uint64_t offset);
++  bool IsBlockCached(uint64_t offset) const;
++
+  private:
+   friend class TableCache;
+   struct Rep;
+diff --git a/table/table.cc b/table/table.cc
+index 29e835f..e67203e 100644
+--- a/table/table.cc
++++ b/table/table.cc
+@@ -205,6 +205,72 @@ Iterator* Table::BlockReader(void* arg, const ReadOptions& options,
+   return iter;
+ }
+ 
++uint64_t Table::block_cache_id() const { return rep_->cache_id; }
++
++namespace {
++// Mirrors the block cache key layout in Table::BlockReader below.
++void EncodeBlockCacheKey(uint64_t cache_id, uint64_t offset, char* buf16) {
++  EncodeFixed64(buf16, cache_id);
++  EncodeFixed64(buf16 + 8, offset);
++}
++}  // namespace
++
++void Table::ForEachDataBlock(
++    uint64_t file_number,
++    const std::function<void(const LeaperBlockInfo&)>& cb) const {
++  Iterator* index = rep_->index_block->NewIterator(rep_->options.comparator);
++  std::string prev_key;
++  bool have_prev = false;
++  for (index->SeekToFirst(); index->Valid(); index->Next()) {
++    BlockHandle handle;
++    Slice input = index->value();
++    if (!handle.DecodeFrom(&input).ok()) break;
++    LeaperBlockInfo info;
++    info.file_number = file_number;
++    info.offset = handle.offset();
++    info.size = handle.size();
++    // An index entry's key is >= the block's last key and < the next block's
++    // first key, so it is a valid upper bound; the previous index key bounds
++    // this block from below. That is all the index gives us without reading
++    // the data blocks, and it is enough for an overlap check.
++    info.largest_key = index->key();
++    info.smallest_key = have_prev ? Slice(prev_key) : index->key();
++    cb(info);
++    prev_key.assign(index->key().data(), index->key().size());
++    have_prev = true;
++  }
++  delete index;
++}
++
++void Table::WarmBlock(uint64_t offset, uint64_t size) {
++  if (rep_->options.block_cache == nullptr) return;
++  BlockHandle handle;
++  handle.set_offset(offset);
++  handle.set_size(size);
++  std::string enc;
++  handle.EncodeTo(&enc);
++  ReadOptions ro;
++  ro.fill_cache = true;
++  delete BlockReader(const_cast<Table*>(this), ro, Slice(enc));
++}
++
++void Table::EvictBlock(uint64_t offset) {
++  if (rep_->options.block_cache == nullptr) return;
++  char key[16];
++  EncodeBlockCacheKey(rep_->cache_id, offset, key);
++  rep_->options.block_cache->Erase(Slice(key, sizeof(key)));
++}
++
++bool Table::IsBlockCached(uint64_t offset) const {
++  if (rep_->options.block_cache == nullptr) return false;
++  char key[16];
++  EncodeBlockCacheKey(rep_->cache_id, offset, key);
++  Cache::Handle* h = rep_->options.block_cache->Lookup(Slice(key, sizeof(key)));
++  if (h == nullptr) return false;
++  rep_->options.block_cache->Release(h);
++  return true;
++}
++
+ Iterator* Table::NewIterator(const ReadOptions& options) const {
+   return NewTwoLevelIterator(
+       rep_->index_block->NewIterator(rep_->options.comparator),
+diff --git a/table/table_builder.cc b/table/table_builder.cc
+index 29a619d..e751b29 100644
+--- a/table/table_builder.cc
++++ b/table/table_builder.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "leveldb/comparator.h"
+ #include "leveldb/env.h"
++#include "leveldb/leaper_hooks.h"
+ #include "leveldb/filter_policy.h"
+ #include "leveldb/options.h"
+ #include "table/block_builder.h"
+@@ -43,6 +44,7 @@ struct TableBuilder::Rep {
+   BlockBuilder data_block;
+   BlockBuilder index_block;
+   std::string last_key;
++  std::string first_key_in_block;  // Leaper: block key bounds at write time
+   int64_t num_entries;
+   bool closed;  // Either Finish() or Abandon() has been called.
+   FilterBlockBuilder* filter_block;
+@@ -112,6 +114,9 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
+     r->filter_block->AddKey(key);
+   }
+ 
++  if (r->data_block.empty()) {
++    r->first_key_in_block.assign(key.data(), key.size());
++  }
+   r->last_key.assign(key.data(), key.size());
+   r->num_entries++;
+   r->data_block.Add(key, value);
+@@ -129,6 +134,16 @@ void TableBuilder::Flush() {
+   if (r->data_block.empty()) return;
+   assert(!r->pending_index_entry);
+   WriteBlock(&r->data_block, &r->pending_handle);
++  if (ok() && r->options.leaper_hooks != nullptr) {
++    // The only point where a block's extent and both key bounds are known
++    // together, and where the contents are still in memory.
++    LeaperBlockInfo info;
++    info.offset = r->pending_handle.offset();
++    info.size = r->pending_handle.size();
++    info.smallest_key = Slice(r->first_key_in_block);
++    info.largest_key = Slice(r->last_key);
++    r->options.leaper_hooks->OnOutputBlock(info);
++  }
+   if (ok()) {
+     r->pending_index_entry = true;
+     r->status = r->file->Flush();
