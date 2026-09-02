@@ -1,5 +1,6 @@
 build/
 build-rocksdb/
+build-async/
 .venv/
 .omc/
 __pycache__/

@@ -47,12 +47,14 @@ What can fairly be said, on the corrected measurements:
   every warming policy shares (reclaiming dead blocks), with 73% of its
   prefetched blocks read; warming every block a compaction writes is neutral
   and adds latency spikes; an oracle shows two more points of headroom.
-* **It does not reproduce outside that band.** With a cache smaller than the
-  working set no prefetcher helps and warming everything costs 3-6 points;
-  with a cache larger than it, warming everything beats selection (+7.0 vs
-  +2.65pp), because recall then matters more than precision. Whether a
-  deployment sits in the band is decided by cache size, operation rate and how
-  long a hot range stays hot, not by the device.
+* **It does not reproduce outside that band, and the band is set by reads
+  per hot lifetime against cache size — not by the device.** With a cache
+  smaller than the working set no prefetcher helps and warming everything
+  costs 3-6 points; with a cache larger than it, warming everything beats
+  selection (+7.0 vs +2.65pp), because recall then matters more than
+  precision. On the slow-storage configuration where Leaper was neutral,
+  making hot ranges stay hot five times longer — nothing else changed — takes
+  it to +6.9pp over the floor and +4.5pp over warming everything.
 * **On slow storage the cheapest policy wins:** warm flush outputs only
   (RocksDB's `kFlushOnly`), +1.3pp for 8k warmed blocks and no model. This is
   the policy the fifth defect had silently reduced "WarmAll" to, which is why
@@ -96,9 +98,9 @@ the learned prefetcher.
 **A learned prefetcher's real competitors are "warm everything" and "warm
 flush outputs only", not LRU** — and which of the three wins is a property of
 the cache-to-working-set ratio, not of the method. Selection pays in a band
-around "cache ≈ working set" (+2.9pp over the shared floor on NVMe/128 MB);
-below it nothing pays; above it recall beats precision and warming
-everything wins. Every earlier finding in this repository that "WarmAll
+around "cache ≈ working set" (+2.9pp over the shared floor on NVMe/128 MB,
++6.9pp on slow storage once hot ranges live 40 s instead of 8); below it
+nothing pays; above it recall beats precision and warming everything wins. Every earlier finding in this repository that "WarmAll
 dominates" was measured with compaction-output warming broken and
 compaction reads in the denominator, and does not survive the fix.
 

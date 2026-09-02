@@ -1,5 +1,13 @@
 # M8 — Review follow-up: defects, missing pieces, and verifying the paper on its own terms
 
+> **Read section H first.** This document is written in the order the work
+> happened, and two measurement defects were found along the way (the fifth
+> and sixth, below). Every hit ratio in sections E, F and G — and in the M0-M7
+> documents — was measured with one or both of them present and is
+> superseded. Section H holds the corrected measurements; the earlier
+> sections are kept because the record of how a conclusion flipped twice is
+> part of what this artifact has to say.
+
 > **Scope note.** As elsewhere: LevelDB/RocksDB, synthetic workloads and one
 > set of real cache-trace samples, NVMe with emulated slow storage. Not a
 > replication of the paper's X-Engine measurements.
@@ -593,8 +601,17 @@ Three rows of H1 repeated with an identical binary, seed and protocol:
 | WarmAll | 43.27% | 43.55% | 0.28pp |
 | Leaper (prefetch only) | 46.56% | 46.52% | 0.04pp |
 
-Compaction counts also repeat (59/58, 36/33, 58/58). **Differences under
-about 0.3pp in the slow-storage tables are not differences.** That covers
+And the same three rows of H2 (NVMe, 128 MB):
+
+| policy | run 1 | run 2 | difference |
+|---|---|---|---|
+| LRU | 83.34% | 83.32% | 0.02pp |
+| WarmAll | 83.48% | 83.49% | 0.01pp |
+| Leaper (prefetch only) | 86.57% | 86.75% | 0.18pp |
+
+Compaction counts also repeat (59/58, 36/33, 58/58 on slow storage; 252/252,
+252/249, 254/249 on NVMe). **Differences under about 0.3pp in the
+slow-storage tables, and about 0.2pp on NVMe, are not differences.** That covers
 Leaper-vs-EagerEvict in H1 (0.02pp) and H5's Leaper-vs-LRU (0.31pp); it does
 not cover WarmAll's -2.4pp, WarmFlushOnly's +0.47pp over EagerEvict, SSAD's
 +0.73pp on the post-shift period, or anything in H2.
@@ -639,6 +656,45 @@ as many reads during its 8 s lifetime, which is five times as many chances
 for a prefetched block to be hit before it is evicted. H14 varies the
 lifetime directly to test that.
 
+### H11 — charging the warm reads to a separate thread
+
+Everything above warms from the compaction thread, so on slow storage every
+warmed block costs the compaction 200 us. `--warm_async=1` moves the reads
+to a dedicated thread; under an emulated per-read delay that makes them free
+(no device queue to contend on), which is the opposite bound. Slow storage,
+64 MB cache, same runs as H1:
+
+| policy | warm on compaction thread (H1) | comps | warm on its own thread | comps | p99 us (sync → async) |
+|---|---|---|---|---|---|
+| WarmAll | 43.27% | 36 | **42.37%** | 56 | 296 → 557 |
+| Leaper (prefetch only) | 46.56% | 58 | 46.51% | 57 | 292 → 346 |
+| Oracle (W=1) | 46.02% | 50 | 46.96% | 59 | 325 → 414 |
+
+Compaction throughput comes back (36 → 56 for WarmAll) and the verdict does
+not change. WarmAll gets *worse* with free reads, because more compactions
+now finish and it warms 670k blocks instead of 475k through a 16k-block
+cache; its p99 nearly doubles from the displacement. Leaper is unchanged.
+The oracle gains 0.9pp — the part of its H1 deficit that was the slowdown —
+and ends +0.4pp over EagerEvict, which is about the noise floor. On a cache
+smaller than the working set, **the cost of warming is displacement, and no
+accounting for the read makes it go away.** WarmAll's real-device cost lies
+between these two rows: the reads would neither stall compaction outright nor
+be free, but queue against the workload's own.
+
+The same check on the zipf 0.99 workload (H4), where both prefetchers lose
+5pp to LRU:
+
+| policy | warm on compaction thread | comps | warm on its own thread | comps | p99 us |
+|---|---|---|---|---|---|
+| LRU | 58.98% | 35 | — | — | 408 |
+| WarmAll | 54.30% | 21 | 53.36% | 36 | 443 → 286 |
+| Leaper (prefetch only) | 53.86% | 23 | 53.26% | 36 | 362 → 287 |
+
+Same picture: the hit ratio drops a further 0.6-0.9pp once the warms are
+free, and the tail latency improves because compaction no longer stalls —
+two different costs, and the one that decides the hit ratio is the one that
+does not depend on where the read runs.
+
 ### H12 — RocksDB, workload-only counting (m7v3)
 
 NVMe, 128 MB block cache, 40,000 ops/s, 300 s; same lifecycle workload as H2.
@@ -667,4 +723,74 @@ first tenth of each range while the hot keys are spread across it. The row
 cache result is the same story one level up: a 32 MB row cache taken out of
 a 128 MB budget holds fewer bytes than the blocks it displaces.
 
-(Amended after H13, below, which raises the scan to the whole range.)
+### H13 — RocksDB with the warm scan covering the whole range
+
+| warm scan per hot range | hit ratio | vs stock | background lookups |
+|---|---|---|---|
+| 4,096 keys (H12) | 81.92% | +0.06pp | 1.26M |
+| 12,000 keys | 82.01% | +0.15pp | 1.44M |
+| 40,000 keys (the whole range) | 82.23% | +0.37pp | 2.09M |
+
+Scanning the whole range warms ten times as much and buys 0.3pp — above
+RocksDB's noise, and a tenth of what the same model earns on LevelDB in the
+same regime. The rest of the gap is what the iterator warms *besides* the
+compaction's output: a merging iterator over a 40,000-key range reads the
+data blocks of every level that holds a version of those keys, so most of
+what it pulls in is older-level blocks that were cold for a reason, and it
+has no way to touch only the file the compaction just wrote. The LevelDB hook
+warms exactly those output blocks and nothing else (73% of them read); the
+RocksDB adapter cannot, without either a patch to `CompactionJob` or a way
+to open the output SST under the same cache keys the table reader will use.
+That, not the model, is what a faithful RocksDB port still needs.
+
+### H14 — how long a hot range stays hot
+
+H10 left one variable between slow-128 MB (Leaper neutral) and NVMe-128 MB
+(Leaper +2.9pp): reads per hot lifetime. Here the lifetime moves and nothing
+else does; the model is retrained for each workload (its own seed-42 run).
+
+Slow storage, 128 MB cache, lifetimes 8 s (H10) → 40 s:
+
+| policy | lifetime 8 s | lifetime 40 s | vs floor at 40 s | precision at 40 s |
+|---|---|---|---|---|
+| LRU | 55.91% | 78.84% | — | — |
+| EagerEvict | +3.62pp | +0.99pp | — | — |
+| WarmAll | -0.05pp | +3.37pp | +2.38pp | 0.19 |
+| Leaper (prefetch only) | +3.47pp | **+7.90pp** | **+6.91pp** | 0.74 |
+
+Five times the reads per lifetime turns Leaper's prefetch from neutral into
++6.9pp over the floor and +4.5pp over WarmAll — on slow storage, with the
+warm reads still on the compaction thread (52 compactions against stock's
+56), and with the same 128 MB cache that gave nothing at 8 s. Precision goes
+from 0.42 to 0.74 because a warmed block now has forty seconds of demand to
+meet instead of eight. **The regime that decides whether selection pays is
+reads per hot lifetime against cache size**, not the device: slow storage
+was never the problem, the 8 s lifetime at 8,000 ops/s was.
+
+And the reverse on NVMe, 128 MB cache, lifetimes 8 s (H2) → 2 s:
+
+| policy | lifetime 8 s | lifetime 2 s | vs floor at 2 s | precision at 2 s |
+|---|---|---|---|---|
+| LRU | 83.34% | 64.57% | — | — |
+| EagerEvict | +0.33pp | +0.78pp | — | — |
+| WarmAll | +0.14pp | +0.73pp | -0.05pp | 0.10 |
+| Leaper (prefetch only) | +3.23pp | +1.91pp | +1.13pp | 0.27 |
+
+A quarter of the reads per lifetime cuts Leaper's gain over the floor from
++2.9pp to +1.1pp and its precision from 0.73 to 0.27; the ordering survives
+(selection still beats warming everything, which is neutral) but most of
+the value is gone. Put together with the row above, the two runs move the
+same knob in opposite directions from the two H10 configurations and get the
+opposite results, which is as close to isolating the variable as this
+harness can get.
+
+**What this means for the paper's claim.** The paper measured Leaper on
+production e-commerce and messaging traffic whose hot ranges — a sale, a
+conversation — stay hot for minutes to hours against a cache that holds
+them. That is the top-right corner of this map, where selection pays
+several points over warming everything and warming everything pays over
+LRU. The synthetic workload that this repository started from (8 s
+lifetimes at 8,000 ops/s on a 64 MB cache) is the bottom-left corner, where
+nothing pays, and the early conclusion that "WarmAll dominates" was a
+statement about that corner, measured with two defects on top. Neither
+corner is the whole picture; the map is.
