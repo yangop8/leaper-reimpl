@@ -1,0 +1,98 @@
+{
+  "range_size": 300,
+  "n_ranges": 2112,
+  "slot_s": 2.0,
+  "history": 6,
+  "gamma": 3,
+  "feature_names": [
+    "read_rate_t-6",
+    "read_rate_t-5",
+    "read_rate_t-4",
+    "read_rate_t-3",
+    "read_rate_t-2",
+    "read_rate_t-1",
+    "write_rate_t-6",
+    "write_rate_t-5",
+    "write_rate_t-4",
+    "write_rate_t-3",
+    "write_rate_t-2",
+    "write_rate_t-1",
+    "hour",
+    "minute",
+    "second",
+    "precursor_rate_0",
+    "precursor_rate_1",
+    "precursor_rate_2"
+  ],
+  "baseline": {
+    "precision": 0.6612759827588147,
+    "recall": 0.6609412611639783,
+    "f1": 0.6611085795937196,
+    "auc": 0.5065371763286755,
+    "ap": 0.6615355674398656
+  },
+  "lightgbm": {
+    "precision": 0.65771484375,
+    "recall": 1.0,
+    "f1": 0.793519882179676,
+    "auc": 0.5058365663208367,
+    "ap": 0.6618261200416333,
+    "threshold": 0.5,
+    "precision_at_baseline_recall": 0.6612708648636793
+  },
+  "ablation": {
+    "R": {
+      "precision": 0.65771484375,
+      "recall": 1.0,
+      "f1": 0.793519882179676,
+      "auc": 0.5044692012194834,
+      "ap": 0.6614037603111829,
+      "threshold": 0.5,
+      "precision_at_baseline_recall": 0.6600979137191493
+    },
+    "R+W": {
+      "precision": 0.65771484375,
+      "recall": 1.0,
+      "f1": 0.793519882179676,
+      "auc": 0.5056768084446488,
+      "ap": 0.6624004357045361,
+      "threshold": 0.5,
+      "precision_at_baseline_recall": 0.6596901589171338
+    },
+    "R+W+T": {
+      "precision": 0.65771484375,
+      "recall": 1.0,
+      "f1": 0.793519882179676,
+      "auc": 0.5054798105273896,
+      "ap": 0.6623691314138553,
+      "threshold": 0.5,
+      "precision_at_baseline_recall": 0.6601631306728298
+    },
+    "R+W+T+P": {
+      "precision": 0.65771484375,
+      "recall": 1.0,
+      "f1": 0.793519882179676,
+      "auc": 0.5058365663208367,
+      "ap": 0.6618261200416333,
+      "threshold": 0.5,
+      "precision_at_baseline_recall": 0.6612708648636793
+    }
+  },
+  "transitions": {
+    "steady_hot": 58759,
+    "death": 30098,
+    "birth": 30143,
+    "steady_cold": 16168
+  },
+  "positive_rate": 0.6556045069839015,
+  "meta": {
+    "source": "/private/tmp/claude-501/-Users-yang-Desktop-repos-Leaper/25d5d479-4c8d-44a4-b7f5-9889aa13a1e5/scratchpad/twitter/cluster019.csv",
+    "threads": "1",
+    "num_keys": "633357",
+    "rows": "1000000",
+    "span_s": "525",
+    "read_ratio": "0.7403",
+    "key_dist": "twitter",
+    "clock_offset_s": "0"
+  }
+}

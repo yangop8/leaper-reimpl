@@ -120,13 +120,27 @@ void Adapter::Listener::Begin(int level, bool is_flush, uint64_t,
   info.est_blocks = est_blocks;
   a_->core_->OnCompactionBegin(info, candidates, a_->NowUs());
 
-  // Phase 2: ask for every candidate range and warm the ones the core wants.
+  // Decide now, warm later. The first version of this adapter warmed here, at
+  // compaction *begin* -- before the output files existed -- so every seek hit
+  // the input files and pulled in exactly the blocks the compaction was about
+  // to invalidate. The M7 numbers measured with that version showed Leaper at
+  // +0.00pp with a tripled p99: all of the cost, none of the benefit.
+  std::vector<leaper::BlockRef> chosen;
   for (const leaper::BlockRef& b : candidates) {
-    if (a_->core_->ShouldPrefetch(b, a_->NowUs())) a_->bridge_->Prefetch(b);
+    if (a_->core_->ShouldPrefetch(b, a_->NowUs())) chosen.push_back(b);
   }
+  std::lock_guard<std::mutex> lock(a_->mu_);
+  a_->pending_ = std::move(chosen);
 }
 
 void Adapter::Listener::End() {
+  std::vector<leaper::BlockRef> chosen;
+  {
+    std::lock_guard<std::mutex> lock(a_->mu_);
+    chosen.swap(a_->pending_);
+  }
+  // The new files are installed and readable; warming now lands on them.
+  for (const leaper::BlockRef& b : chosen) a_->bridge_->Prefetch(b);
   leaper::CompactionInfo info;
   a_->core_->OnCompactionEnd(info, a_->NowUs());
 }
@@ -166,6 +180,7 @@ void Adapter::OnWrite(const rocksdb::Slice& key) {
   core_->OnWrite(key.data(), key.size(), NowUs());
 }
 void Adapter::set_qps(double qps) { core_->set_qps(qps); }
+void Adapter::set_health(double m) { core_->set_health(m); }
 leaper::Stats Adapter::stats() const { return core_->stats(); }
 uint64_t Adapter::warmed_ranges() const {
   std::lock_guard<std::mutex> lock(mu_);

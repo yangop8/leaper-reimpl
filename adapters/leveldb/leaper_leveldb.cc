@@ -26,12 +26,16 @@ class Adapter::CacheBridge : public leaper::CacheOps {
   void Evict(const leaper::BlockRef& b) override {
     if (a_->ops_ == nullptr) return;
     leaper::ScopedInternalCacheAccess guard;
-    a_->ops_->EvictBlock(b.file_id, FileSize(b.file_id), b.offset);
+    if (!a_->ops_->EvictBlock(b.file_id, FileSize(b.file_id), b.offset)) {
+      a_->evict_failed_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
   void Prefetch(const leaper::BlockRef& b) override {
     if (a_->ops_ == nullptr) return;
     leaper::ScopedInternalCacheAccess guard;
-    a_->ops_->WarmBlock(b.file_id, FileSize(b.file_id), b.offset, b.size);
+    if (!a_->ops_->WarmBlock(b.file_id, FileSize(b.file_id), b.offset, b.size)) {
+      a_->warm_failed_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
   bool IsCached(const leaper::BlockRef& b) override {
     if (a_->ops_ == nullptr) return false;
@@ -86,6 +90,10 @@ void Adapter::OnGet(const leveldb::Slice& user_key) {
   core_->OnRead(user_key.data(), user_key.size(), NowUs());
 }
 
+void Adapter::OnSeek(const leveldb::Slice& user_key) {
+  core_->OnRead(user_key.data(), user_key.size(), NowUs());
+}
+
 void Adapter::OnPut(const leveldb::Slice& user_key) {
   core_->OnWrite(user_key.data(), user_key.size(), NowUs());
 }
@@ -108,6 +116,16 @@ void Adapter::OnCompactionBegin(
       blocks.push_back(r);
     }
     pending_warm_.clear();
+  }
+  // |C ∩ M_i|: how much of the cache this compaction is about to invalidate.
+  // Counted before the core acts so phase-1 evictions are not mistaken for
+  // invalidation. Flushes have no inputs and invalidate nothing.
+  if (!is_flush) {
+    uint64_t cached = 0;
+    for (const leaper::BlockRef& r : blocks) {
+      if (bridge_->IsCached(r)) ++cached;
+    }
+    core_->RecordInvalidation(cached);
   }
   leaper::CompactionInfo info;
   info.level = level;

@@ -137,7 +137,10 @@ Two tests are load-bearing rather than decorative:
 
 Each script runs the whole protocol: train on one seed, calibrate the two-phase
 constants from that run's own compaction log, then evaluate every policy on a
-*different* seed from an identical database. Environment variables select the
+*different* seed from an identical database. `tools/paper_metrics.py` then
+reports a matrix in the paper's own terms — miss rate inside "during and after
+compaction" windows, latency spikes, overhead from unthrottled runs, `|C ∩ M_i|`
+and prefetch precision — rather than as a whole-run hit ratio. Environment variables select the
 regime (`CACHE_MB`, `READ_DELAY_US`, `OP_RATE`, `WRITE_CORR`, `RANGE_SIZE`, ...).
 
 ## Milestones
@@ -149,18 +152,20 @@ regime (`CACHE_MB`, `READ_DELAY_US`, `OP_RATE`, `WRITE_CORR`, `RANGE_SIZE`, ...)
 | M2-M3 | Online collector, inference, two-phase prefetcher on LevelDB | [`docs/M2-M3-leveldb-integration.md`](docs/M2-M3-leveldb-integration.md) |
 | M4 | Baseline matrix, oracle upper bound, regime sweeps | [`docs/M4-results.md`](docs/M4-results.md) |
 | M5-M7 | Core/adapter split and the RocksDB port | [`docs/M5-M7-rocksdb.md`](docs/M5-M7-rocksdb.md) |
+| M8 | Review follow-up: defects fixed, the paper's own metrics, real traces | [`docs/M8-review-followup.md`](docs/M8-review-followup.md) |
 
 ## Known gaps
 
-* **No real traces.** Every negative result here traces back to a property of the
-  synthetic workload. Driving the pipeline with Meta's FAST'20 RocksDB traces or
-  Twitter's twemcache traces is the highest-value next step and would settle
-  whether the limitation is the workload or the method.
-* **Algorithm 1 does not terminate on these workloads.** The paper's efficient-
-  expansion criterion keeps saying "expand" once the access matrix reaches a
-  stable occupancy, all the way to three key ranges for the whole database. A
-  floor on the range count is added here, and the reported range size is
-  determined by that floor rather than by the paper's criterion.
+* **Real traces: only Twitter cache-trace samples so far**, and those turn out to
+  be the wrong instrument for a key-range predictor (anonymised hash-like keys
+  carry no locality in byte order; 1M-request samples span minutes, not days).
+  A *database* trace with structured keys — Meta's FAST'20 RocksDB traces — is
+  what would settle whether the limitation is the workload or the method. The
+  converter and pipeline are in place (`tools/convert_twitter_trace.py`).
+* **Algorithm 1 does not terminate on the synthetic workloads** (it does on the
+  real Twitter samples). A floor on the range count is added for the synthetic
+  case, and there the reported range size is determined by that floor rather
+  than by the paper's criterion.
 * **No phase 1 on RocksDB.** Block cache keys derive from a per-file
   `OffsetableCacheKey` inside the table reader, so eviction is not implementable
   as a plug-in there.

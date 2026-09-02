@@ -36,6 +36,7 @@ const char* PolicyName(Policy p) {
     case Policy::kEagerEvict: return "eager_evict";
     case Policy::kIncrementalWarmup: return "incremental_warmup";
     case Policy::kWarmAll: return "warm_all";
+    case Policy::kWarmFlush: return "warm_flush";
     case Policy::kLeaper: return "leaper";
     case Policy::kOracle: return "oracle";
   }
@@ -47,6 +48,7 @@ bool ParsePolicy(const std::string& name, Policy* out) {
   else if (name == "eager_evict") *out = Policy::kEagerEvict;
   else if (name == "incremental_warmup") *out = Policy::kIncrementalWarmup;
   else if (name == "warm_all") *out = Policy::kWarmAll;
+  else if (name == "warm_flush") *out = Policy::kWarmFlush;
   else if (name == "leaper") *out = Policy::kLeaper;
   else if (name == "oracle") *out = Policy::kOracle;
   else return false;
@@ -116,7 +118,17 @@ class LeaperImpl : public Leaper {
  public:
   LeaperImpl(const Options& o, RangeMapper* mapper, CacheOps* cache)
       : opt_(o), mapper_(mapper), cache_(cache),
-        collector_(o.max_ranges, o.history_slots, o.slot_seconds, o.sample_rate) {}
+        collector_(CollectorSlots(o), o.history_slots, o.slot_seconds,
+                   o.sample_rate) {}
+
+  // The counter table must cover the key space and no more. Left at its old
+  // default of 2^22 slots it allocated ~460 MB -- larger than the block cache
+  // in most experiments and four orders of magnitude above the paper's 3-16 KB
+  // collector -- which made every overhead figure meaningless.
+  static size_t CollectorSlots(const Options& o) {
+    const size_t needed = static_cast<size_t>(o.max_range_id) + 1;
+    return std::min(o.max_ranges, std::max<size_t>(needed, 64));
+  }
 
   bool Init(std::string* error) {
     if (opt_.policy != Policy::kLeaper) return true;
@@ -164,7 +176,10 @@ class LeaperImpl : public Leaper {
     std::lock_guard<std::mutex> lock(mu_);
     hot_t2_.clear();
     prefetched_bytes_ = 0;
+    cur_is_flush_ = info.is_flush;
     budget_bytes_ = static_cast<uint64_t>(opt_.max_prefetch_frac * opt_.cache_bytes);
+
+    if (ssad_suspended_ && opt_.policy == Policy::kLeaper) return;
 
     switch (opt_.policy) {
       case Policy::kOff:
@@ -172,6 +187,7 @@ class LeaperImpl : public Leaper {
         return;
 
       case Policy::kWarmAll:
+      case Policy::kWarmFlush:
         // Warm everything the compaction writes; nothing to decide up front.
         return;
 
@@ -254,9 +270,21 @@ class LeaperImpl : public Leaper {
       // what keeps this safe: those are blocks LRU would have dropped anyway.
       const std::vector<RangeSpan> keep = ToSpans(hot1);
       const uint64_t t0 = NowUs();
-      for (const BlockRef& b : input_blocks) {
-        if (!BlockOverlaps(b, keep)) {
-          cache_->Evict(b);
+      // Algorithm 3's hybrid: SelectOverlapping picks binary search or
+      // sort-merge from m (blocks) and n (hot spans). It needs the blocks
+      // sorted by range, which per-file index order does not guarantee across
+      // files.
+      std::vector<BlockRef> sorted(input_blocks);
+      std::sort(sorted.begin(), sorted.end(),
+                [](const BlockRef& a, const BlockRef& b) {
+                  return a.first_range < b.first_range;
+                });
+      const std::vector<size_t> keep_idx = SelectOverlapping(sorted, keep);
+      std::vector<bool> keep_mask(sorted.size(), false);
+      for (size_t i : keep_idx) keep_mask[i] = true;
+      for (size_t i = 0; i < sorted.size(); ++i) {
+        if (!keep_mask[i]) {
+          cache_->Evict(sorted[i]);
           ++stats_.blocks_evicted;
         }
       }
@@ -275,12 +303,18 @@ class LeaperImpl : public Leaper {
       case Policy::kWarmAll:
         want = true;
         break;
+      case Policy::kWarmFlush:
+        // Fresh L0 files hold the most recently written keys, which under a
+        // write-then-read workload are the hottest; compaction outputs are
+        // mostly cold. This is what RocksDB's kFlushOnly does.
+        want = cur_is_flush_;
+        break;
       case Policy::kIncrementalWarmup:
       case Policy::kOracle:
         want = BlockOverlaps(block, hot_t2_);
         break;
       case Policy::kLeaper:
-        want = opt_.enable_phase2 && BlockOverlaps(block, hot_t2_);
+        want = opt_.enable_phase2 && !ssad_suspended_ && BlockOverlaps(block, hot_t2_);
         break;
     }
     if (!want) return false;
@@ -316,6 +350,7 @@ class LeaperImpl : public Leaper {
   Stats stats() const override {
     std::lock_guard<std::mutex> lock(mu_);
     Stats s = stats_;
+    s.ssad_suspended = ssad_suspended_;
     s.reads_seen = collector_.reads_seen();
     s.writes_seen = collector_.writes_seen();
     s.sampled = collector_.sampled();
@@ -323,6 +358,35 @@ class LeaperImpl : public Leaper {
   }
 
   void set_qps(double q) override { qps_.store(q, std::memory_order_relaxed); }
+
+  void set_health(double miss_ratio) override {
+    if (opt_.ssad_miss_threshold <= 0.0 && opt_.ssad_relative <= 0.0) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    bool bad;
+    if (opt_.ssad_relative > 0.0) {
+      if (ssad_ewma_ < 0.0) ssad_ewma_ = miss_ratio;  // first sample seeds it
+      bad = miss_ratio > ssad_ewma_ * (1.0 + opt_.ssad_relative);
+      // Only track the baseline while healthy, or the anomaly becomes the norm.
+      if (!bad) ssad_ewma_ += opt_.ssad_ewma_alpha * (miss_ratio - ssad_ewma_);
+    } else {
+      bad = miss_ratio > opt_.ssad_miss_threshold;
+    }
+    ssad_run_ = (bad == ssad_last_bad_) ? ssad_run_ + 1 : 1;
+    ssad_last_bad_ = bad;
+    if (ssad_run_ < opt_.ssad_window) return;
+    if (bad && !ssad_suspended_) {
+      ssad_suspended_ = true;
+      ++stats_.ssad_suspensions;
+    } else if (!bad && ssad_suspended_) {
+      ssad_suspended_ = false;
+    }
+  }
+
+  void RecordInvalidation(uint64_t cached_input_blocks) override {
+    std::lock_guard<std::mutex> lock(mu_);
+    stats_.invalidated_blocks += cached_input_blocks;
+    ++stats_.compactions_seen;
+  }
 
  private:
   bool Collecting() const {
@@ -362,8 +426,12 @@ class LeaperImpl : public Leaper {
   mutable std::mutex mu_;
   std::vector<RangeSpan> hot_t2_;
   uint64_t prefetched_bytes_ = 0, budget_bytes_ = 0;
+  bool cur_is_flush_ = false;
   Stats stats_;
   std::atomic<double> qps_{0.0};
+  bool ssad_suspended_ = false, ssad_last_bad_ = false;
+  int ssad_run_ = 0;
+  double ssad_ewma_ = -1.0;
 };
 
 uint64_t LeaperImpl::NowUs() {

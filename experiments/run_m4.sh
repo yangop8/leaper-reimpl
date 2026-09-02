@@ -37,12 +37,16 @@ WARMUP=30
 WORKLOAD=(
   --num=${NUM_KEYS:-4000000} --value_size=100 --cache_mb="$CACHEMB" --write_buffer_mb=8
   --max_file_mb=4 --block_kb=4
-  --key_dist=lifecycle --life_range_size=$RANGE --life_hot_slots=${HOT_SLOTS:-16}
-  --life_lifetime_s=8 --life_ramp_frac=0.25 --life_chain=4 --life_chain_lag=0.2
+  --key_dist=${KEY_DIST:-lifecycle} --zipf=${ZIPF:-0.99}
+  --life_range_size=$RANGE --life_hot_slots=${HOT_SLOTS:-16}
+  --life_lifetime_s=${LIFETIME_S:-8} --life_ramp_frac=0.25 --life_chain=4 --life_chain_lag=0.2
+  --scan_ratio=${SCAN_RATIO:-0.0}
+  --shift_at_s=${SHIFT_AT_S:-0} --shift_hot_slots=${SHIFT_HOT_SLOTS:-64} --shift_lifetime_s=${SHIFT_LIFETIME_S:-3}
   --threads="$NTHREADS" --read_ratio=${READ_RATIO:-0.75} --update_ratio=${UPDATE_RATIO:-0.20}
   --write_corr=${WRITE_CORR:-1.0}
   --op_rate="$OPRATE" --write_rate="$WRATE"
   --duration="$DUR" --warmup=$WARMUP --read_delay_us="$DELAY"
+  ${EXTRA_ARGS:-}
 )
 
 if [ "$STAGE" = "all" ]; then
@@ -52,7 +56,8 @@ echo "=== 1/4 training run (seed 42) ==="
 
 echo "=== 2/4 train models + calibrate phases ==="
 $PY tools/train_leaper.py --trace="$OUT/${TAG}_train" --slot_s=$SLOT \
-    --range_size=$RANGE --steps=6 --out="$OUT/${MODEL_TAG}.model" | tail -20
+    --range_size=$RANGE --steps=6 --dump_eval=2000 --out="$OUT/${MODEL_TAG}.model" | tail -20
+./build/leaper/gbdt_check "$OUT/${MODEL_TAG}.model.txt" "$OUT/${MODEL_TAG}.model.eval.csv" | tail -1
 $PY tools/calibrate_phases.py "$OUT/${TAG}_train" --block_kb=4 --cache_mb="$CACHEMB" \
     | tee "$OUT/${MODEL_TAG}.calibration.txt"
 ALPHA=$(grep -o 'leaper_t1_alpha=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt" | cut -d= -f2)
@@ -91,7 +96,13 @@ for POL in ${POLICIES:-off eager_evict incremental_warmup warm_all leaper leaper
       RUNPOL=leaper
       EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
              --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
-             --leaper_phase1=0) ;;
+             --leaper_phase1=0 ${LEAPER_EXTRA:-}) ;;
+    leaper_p2only_ssad)
+      RUNPOL=leaper
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
+             --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
+             --leaper_phase1=0 --ssad_miss_threshold=${SSAD_THRESHOLD:-0}
+             --ssad_relative=${SSAD_RELATIVE:-0.3} --ssad_window=${SSAD_WINDOW:-5}) ;;
     oracle)
       EXTRA=(--oracle="$OUT/${MODEL_TAG}.oracle.txt") ;;
   esac

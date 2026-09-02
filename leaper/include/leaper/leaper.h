@@ -27,6 +27,7 @@ enum class Policy {
   kEagerEvict,        // drop cache entries of SSTs compaction deleted
   kIncrementalWarmup, // paper's baseline: warm new blocks overlapping cached ones
   kWarmAll,           // warm every newly written block (= RocksDB kFlushAndCompaction)
+  kWarmFlush,         // warm flush outputs only (= RocksDB kFlushOnly)
   kLeaper,            // learned two-phase prefetcher
   kOracle,            // replay of future accesses; upper bound, offline only
 };
@@ -165,6 +166,19 @@ struct Options {
   bool enable_phase1 = true;
   bool enable_phase2 = true;
 
+  // SSAD (paper Section 7.4): a rollback that switches the prefetcher off when
+  // the system looks unhealthy, until the model is refreshed. The paper keys it
+  // on slow-SQL counts; here the health signal is the block cache miss ratio
+  // the harness reports each interval. 0 disables it.
+  double ssad_miss_threshold = 0.0;   // absolute miss ratio; 0 disables
+  // Relative mode: suspend when the miss ratio exceeds its own exponential
+  // moving average by this fraction. An absolute threshold set below a
+  // workload's steady-state miss ratio (0.7 on a workload that sits at 0.75)
+  // switches the prefetcher off permanently, which tests nothing.
+  double ssad_relative = 0.0;         // e.g. 0.3 = 30% above the EWMA; 0 disables
+  double ssad_ewma_alpha = 0.05;
+  int ssad_window = 5;             // consecutive intervals above/below to flip
+
   bool verbose = false;
 };
 
@@ -183,6 +197,12 @@ struct Stats {
   uint64_t blocks_prefetched = 0, blocks_evicted = 0;
   uint64_t overlap_checks = 0, overlap_us = 0;
   uint64_t prefetch_refused_budget = 0;
+  // The paper's own quantity (Formulation 2): blocks of a compaction's inputs
+  // that were resident in the cache when it started, summed over compactions.
+  uint64_t invalidated_blocks = 0;
+  uint64_t compactions_seen = 0;
+  uint64_t ssad_suspensions = 0;   // times the prefetcher was switched off
+  bool ssad_suspended = false;
 };
 
 // The plug-in. Thread-safe: OnRead/OnWrite are called from client threads,
@@ -219,6 +239,11 @@ class Leaper {
 
   virtual Stats stats() const = 0;
   virtual void set_qps(double qps) = 0;
+  // Health signal for SSAD, e.g. the last interval's block cache miss ratio.
+  virtual void set_health(double miss_ratio) = 0;
+  // Called with the number of input blocks that were cache-resident when a
+  // compaction began; the adapter measures it, the core just records it.
+  virtual void RecordInvalidation(uint64_t cached_input_blocks) = 0;
 };
 
 }  // namespace leaper

@@ -53,19 +53,31 @@ BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${TAG}.calibration.txt" | cut -
 echo "calibrated alpha=$ALPHA beta=$BETA"
 
 echo "=== 3/3 policy matrix (seed 1234) ==="
-for POL in off flush_only flush_and_compaction leaper; do
+for POL in ${POLICIES:-off flush_only flush_and_compaction leaper leaper_rowcache}; do
   echo "--- $POL ---"
   EXTRA=()
-  if [ "$POL" = "leaper" ]; then
-    EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
-           --precursors="$OUT/${TAG}.model.precursors.txt"
-           --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
-           --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA")
-  fi
+  RUNPOL="$POL"
+  case "$POL" in
+    leaper)
+      EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
+             --precursors="$OUT/${TAG}.model.precursors.txt"
+             --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
+             --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA") ;;
+    leaper_rowcache)
+      # The paper's rows go to a KV cache; RocksDB has one. Same block cache
+      # budget plus a 32 MB row cache, to see whether the prefetcher's
+      # range-granularity warming helps the row cache more than the block cache.
+      RUNPOL=leaper
+      EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
+             --precursors="$OUT/${TAG}.model.precursors.txt"
+             --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
+             --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA"
+             --row_cache_mb=32) ;;
+  esac
   # Same reset as M4: the workload inserts new keys, so back-to-back policy
   # runs against one database would grow it monotonically and bias whichever
   # policy runs last.
-  "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=1234 --fill=1 --policy="$POL" \
+  "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=1234 --fill=1 --policy="$RUNPOL" \
          ${EXTRA[@]+"${EXTRA[@]}"} --out_prefix="$OUT/${TAG}_$POL"
 done
 

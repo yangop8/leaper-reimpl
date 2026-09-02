@@ -1,0 +1,8 @@
+[T1] 52 compactions, duration median=3.172s max=3.673s
+[T1] alpha = 3.076e-04 seconds per block  (output blocks)
+[T2] 22 measured recoveries, median=22.375s p90=32.778s
+[T2] mean QPS=8035, cache=67108864 B
+[T2] beta = 1.869e+05  (so that beta * Q / S = 22.375s here)
+
+suggested flags: --leaper_t1_alpha=0.000307604 --leaper_t2_beta=186876
+or pin them directly: --leaper_t1_seconds=<per compaction> --leaper_t2_seconds=22.375

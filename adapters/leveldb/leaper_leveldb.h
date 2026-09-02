@@ -7,6 +7,7 @@
 #ifndef LEAPER_ADAPTERS_LEVELDB_H_
 #define LEAPER_ADAPTERS_LEVELDB_H_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -35,6 +36,7 @@ class Adapter : public leveldb::LeaperHooks {
 
   void Bind(leveldb::LeaperEngineOps* ops) override;
   void OnGet(const leveldb::Slice& user_key) override;
+  void OnSeek(const leveldb::Slice& user_key) override;
   void OnPut(const leveldb::Slice& user_key) override;
   void OnCompactionBegin(int level, bool is_flush,
                          const std::vector<leveldb::LeaperBlockInfo>& inputs) override;
@@ -46,11 +48,14 @@ class Adapter : public leveldb::LeaperHooks {
 
   leaper::Stats stats() const { return core_->stats(); }
   void set_qps(double qps) { core_->set_qps(qps); }
+  void set_health(double miss_ratio) { core_->set_health(miss_ratio); }
   // Aligns the plug-in's clock with the measurement window so that offline
   // artefacts indexed by trace time (the oracle's per-slot hot sets, and the
   // timestamp features) line up with what the plug-in sees online.
   void ResetClock();
   uint64_t warmed_blocks() const { return warmed_; }
+  uint64_t warm_failed() const { return warm_failed_.load(); }
+  uint64_t evict_failed() const { return evict_failed_.load(); }
   uint64_t warm_us() const { return warm_us_; }
 
  private:
@@ -75,6 +80,7 @@ class Adapter : public leveldb::LeaperHooks {
   // be opened to enumerate its blocks.
   std::unordered_map<uint64_t, uint64_t> file_sizes_;
   uint64_t warmed_ = 0, warm_us_ = 0;
+  std::atomic<uint64_t> warm_failed_{0}, evict_failed_{0};
 };
 
 }  // namespace leaper_leveldb

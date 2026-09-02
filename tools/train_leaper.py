@@ -224,7 +224,8 @@ def compute_precursors(per_thread, range_size, n_ranges, rates, gamma, eps,
 # Featurisation
 
 
-def build_dataset(read_rate, write_rate, precursors, history, slot_s, gamma, step=1):
+def build_dataset(read_rate, write_rate, precursors, history, slot_s, gamma, step=1,
+                  clock_offset_s=0.0):
     """18 features per (range, slot): 6 read rates, 6 write rates, 3 timestamp
     components, gamma precursor read rates in the previous slot. Label is
     "read at least once in the next slot"."""
@@ -233,7 +234,11 @@ def build_dataset(read_rate, write_rate, precursors, history, slot_s, gamma, ste
     for s in range(history, n_slots - step):
         rh = read_rate[:, s - history:s]                    # (R, history)
         wh = write_rate[:, s - history:s]
-        t = (s + 1) * slot_s                                # prediction time
+        # Prediction time on the *plug-in's* clock. The trace starts at the
+        # measurement window but the online clock starts at the run, so the
+        # timestamp features were offset by the warmup (30 s) between training
+        # and inference until the trace meta began recording the offset.
+        t = (s + 1) * slot_s + clock_offset_s
         stamp = np.tile(
             np.array([(t // 3600) % 24, (t // 60) % 60, t % 60], dtype=np.float32),
             (n_ranges, 1))
@@ -334,7 +339,7 @@ def main():
           f"test > {test_slot} (of {n_slots})")
     train_mask = slot <= valid_slot
 
-    is_read = op == 0
+    is_read = (op == 0) | (op == 3)   # point reads and scan seeks
     if args.range_size > 0:
         range_size = args.range_size
         print(f"[alg1] using --range_size={range_size}")
@@ -362,8 +367,11 @@ def main():
     n_with = int(np.sum(precursors[:, 0] >= 0))
     print(f"[alg2] {n_with:,}/{n_ranges:,} ranges got at least one precursor")
 
+    clock_offset = float(meta.get("clock_offset_s", 0.0))
+    if clock_offset:
+        print(f"[data] timestamp features offset by {clock_offset:.0f}s to match the online clock")
     X, y, s, names = build_dataset(read_rate, write_rate, precursors,
-                                   args.history, args.slot_s, args.gamma)
+                                   args.history, args.slot_s, args.gamma, 1, clock_offset)
     print(f"[data] {X.shape[0]:,} rows x {X.shape[1]} features, "
           f"positive rate {y.mean():.4f}")
 
@@ -476,7 +484,8 @@ def main():
     all_idx = sorted(i for k in ["R", "W", "T", "P"] for i in groups[k])
     for step in range(2, args.steps + 1):
         Xs, ys, ss, _ = build_dataset(read_rate, write_rate, precursors,
-                                      args.history, args.slot_s, args.gamma, step)
+                                      args.history, args.slot_s, args.gamma, step,
+                                      clock_offset)
         trs, vas = ss <= valid_slot, (ss > valid_slot) & (ss <= test_slot)
         if vas.sum() == 0:
             print(f"[multistep] step {step}: validation split empty, stopping")

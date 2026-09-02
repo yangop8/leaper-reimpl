@@ -30,6 +30,8 @@
 #include "rocksdb/db.h"
 #include "rocksdb/filter_policy.h"
 #include "rocksdb/options.h"
+#include "rocksdb/perf_context.h"
+#include "rocksdb/perf_level.h"
 #include "rocksdb/statistics.h"
 #include "rocksdb/table.h"
 #include "rocksdb/write_batch.h"
@@ -48,6 +50,7 @@ struct Flags {
   uint64_t num = 4000000;
   int value_size = 100;
   int cache_mb = 128;
+  int row_cache_mb = 0;         // paper: rows go to a KV cache; RocksDB has one
   int write_buffer_mb = 8;
   int max_file_mb = 4;
   int block_kb = 4;
@@ -130,6 +133,7 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "num", &v)) flags.num = ParseU64("num", v);
     else if (ParseFlag(a, "value_size", &v)) flags.value_size = ParseInt("value_size", v);
     else if (ParseFlag(a, "cache_mb", &v)) flags.cache_mb = ParseInt("cache_mb", v);
+    else if (ParseFlag(a, "row_cache_mb", &v)) flags.row_cache_mb = ParseInt("row_cache_mb", v);
     else if (ParseFlag(a, "write_buffer_mb", &v)) flags.write_buffer_mb = ParseInt("write_buffer_mb", v);
     else if (ParseFlag(a, "max_file_mb", &v)) flags.max_file_mb = ParseInt("max_file_mb", v);
     else if (ParseFlag(a, "block_kb", &v)) flags.block_kb = ParseInt("block_kb", v);
@@ -190,6 +194,12 @@ struct Shared {
   const std::string* value_pool = nullptr;
   std::atomic<bool> running{false}, measuring{false};
   std::atomic<uint64_t> reads{0}, writes{0}, ops_issued{0}, writes_issued{0};
+  // Data-block cache hits/misses seen by the workload threads only. RocksDB's
+  // BLOCK_CACHE_DATA_* tickers are process-wide and also count compaction
+  // input reads and the Leaper listener's own warming scans, both of which
+  // run on background threads; PerfContext is thread-local, so it can tell
+  // them apart.
+  std::atomic<uint64_t> fg_hits{0}, fg_misses{0};
   std::atomic<uint64_t> next_insert_key{0};
   uint64_t run_start_us = 0, measure_start_us = 0;
   std::vector<Histogram*> read_hist, write_hist;
@@ -203,6 +213,9 @@ uint64_t NowUs() {
 }
 
 void WorkerLoop(Shared* s, int tid) {
+  rocksdb::SetPerfLevel(rocksdb::PerfLevel::kEnableCount);  // thread-local
+  rocksdb::get_perf_context()->Reset();
+  uint64_t pc_hits = 0, pc_misses = 0;  // cumulative data-block counts, this thread
   std::mt19937_64 rng(flags.seed * 1000003ULL + tid);
   Dynamics dyn;
   Lifecycle life;
@@ -257,6 +270,18 @@ void WorkerLoop(Shared* s, int tid) {
       t0 = NowUs();
       s->db->Get(ro, key, &value);
       const uint64_t dt = NowUs() - t0;
+      {
+        const rocksdb::PerfContext* pc = rocksdb::get_perf_context();
+        const uint64_t h = pc->block_cache_hit_count - pc->block_cache_index_hit_count -
+                           pc->block_cache_filter_hit_count;
+        const uint64_t m = pc->block_read_count - pc->index_block_read_count -
+                           pc->filter_block_read_count - pc->compression_dict_block_read_count;
+        if (measuring) {
+          s->fg_hits.fetch_add(h - pc_hits, std::memory_order_relaxed);
+          s->fg_misses.fetch_add(m - pc_misses, std::memory_order_relaxed);
+        }
+        pc_hits = h; pc_misses = m;
+      }
       if (measuring) {
         rh->Add(dt);
         s->reads.fetch_add(1, std::memory_order_relaxed);
@@ -327,6 +352,10 @@ int Run() {
   opts.compression = rocksdb::kNoCompression;
   opts.statistics = rocksdb::CreateDBStatistics();
   opts.max_background_jobs = 2;
+  if (flags.row_cache_mb > 0) {
+    opts.row_cache = rocksdb::NewLRUCache(
+        static_cast<size_t>(flags.row_cache_mb) * 1024 * 1024);
+  }
 
   rocksdb::BlockBasedTableOptions bbt;
   bbt.block_cache = rocksdb::NewLRUCache(
@@ -402,7 +431,9 @@ int Run() {
   std::fprintf(csv, "t,qps,read_qps,write_qps,block_lookups,block_hits,hit_ratio,"
                     "read_p50_us,read_p95_us,read_p99_us,write_p99_us,"
                     "compactions_running,compactions_done,flushes_done,trivial_moves,"
-                    "cache_live_mb,cache_stale_mb,stale_ids,sst_files,cache_charge_mb\n");
+                    "cache_live_mb,cache_stale_mb,stale_ids,sst_files,cache_charge_mb,"
+                    "invalidated_blocks,pf_evicted,pf_used,ssad_suspended,pf_inserted,pf_read_once,"
+                    "bg_lookups,bg_hits\n");
 
   shared.run_start_us = NowUs();
   shared.measure_start_us = shared.run_start_us +
@@ -415,6 +446,7 @@ int Run() {
   const int hist_n = Histogram::kNumBuckets;
   std::vector<uint64_t> rprev(hist_n, 0), wprev(hist_n, 0);
   uint64_t prev_reads = 0, prev_writes = 0, prev_hit = 0, prev_miss = 0;
+  uint64_t prev_fgh = 0, prev_fgm = 0;
   uint64_t prev_flush = 0, prev_comp = 0;
 
   auto ticker = [&](uint32_t t) { return opts.statistics->getTickerCount(t); };
@@ -430,6 +462,7 @@ int Run() {
       prev_writes = shared.writes.load();
       prev_hit = ticker(rocksdb::BLOCK_CACHE_DATA_HIT);
       prev_miss = ticker(rocksdb::BLOCK_CACHE_DATA_MISS);
+      prev_fgh = shared.fg_hits.load(); prev_fgm = shared.fg_misses.load();
       prev_flush = ticker(rocksdb::FLUSH_WRITE_BYTES);
       prev_comp = ticker(rocksdb::COMPACT_WRITE_BYTES);
     }
@@ -445,23 +478,30 @@ int Run() {
     for (auto* h : shared.read_hist) h->AccumulateInto(&rcur);
     for (auto* h : shared.write_hist) h->AccumulateInto(&wcur);
 
-    const uint64_t dh = hit - prev_hit, dm = miss - prev_miss;
+    const uint64_t fgh = shared.fg_hits.load(), fgm = shared.fg_misses.load();
+    const uint64_t dh = fgh - prev_fgh, dm = fgm - prev_fgm;
     const uint64_t look = dh + dm;
+    // Everything the process-wide tickers saw beyond the workload threads.
+    const int64_t bg_look_i = static_cast<int64_t>(hit + miss) - static_cast<int64_t>(fgh + fgm);
+    const int64_t bg_hit_i = static_cast<int64_t>(hit) - static_cast<int64_t>(fgh);
+    const uint64_t bg_look = bg_look_i > 0 ? bg_look_i : 0, bg_hit = bg_hit_i > 0 ? bg_hit_i : 0;
     if (adapter != nullptr) {
       adapter->set_qps(static_cast<double>(reads + writes) /
                        std::max(1, sec - flags.warmup));
+      adapter->set_health(look ? 1.0 - static_cast<double>(dh) / look : 0.0);
     }
     const int t = sec - flags.warmup;
     std::fprintf(csv,
         "%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.5f,"
         "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",0,%" PRIu64 ",%" PRIu64
-        ",0,0,0,0,0,0\n",
+        ",0,0,0,0,0,0,0,0,0,0,0,0,%" PRIu64 ",%" PRIu64 "\n",
         t, (reads - prev_reads) + (writes - prev_writes), reads - prev_reads,
         writes - prev_writes, look, dh,
         look ? static_cast<double>(dh) / look : 0.0,
         Percentile(rcur, rprev, 0.50), Percentile(rcur, rprev, 0.95),
         Percentile(rcur, rprev, 0.99), Percentile(wcur, wprev, 0.99),
-        (comp_b - prev_comp) / (1u << 20), (flush_b - prev_flush) / (1u << 20));
+        (comp_b - prev_comp) / (1u << 20), (flush_b - prev_flush) / (1u << 20),
+        bg_look, bg_hit);
     std::fflush(csv);
     std::fprintf(stderr, "t=%3d qps=%7" PRIu64 " hit=%.4f p95=%5" PRIu64 "us\n",
                  t, (reads - prev_reads) + (writes - prev_writes),
@@ -471,6 +511,7 @@ int Run() {
     rprev.swap(rcur); wprev.swap(wcur);
     prev_reads = reads; prev_writes = writes;
     prev_hit = hit; prev_miss = miss;
+    prev_fgh = fgh; prev_fgm = fgm;
     prev_flush = flush_b; prev_comp = comp_b;
   }
 
@@ -481,9 +522,18 @@ int Run() {
 
   const uint64_t hit = ticker(rocksdb::BLOCK_CACHE_DATA_HIT);
   const uint64_t miss = ticker(rocksdb::BLOCK_CACHE_DATA_MISS);
-  std::fprintf(stderr, "\n[summary] block cache: %" PRIu64 " hits, %" PRIu64
-               " misses (%.4f hit ratio)\n",
+  const uint64_t fgh = shared.fg_hits.load(), fgm = shared.fg_misses.load();
+  std::fprintf(stderr, "\n[summary] block cache, workload threads: %" PRIu64 " hits, %" PRIu64
+               " misses (%.4f hit ratio)\n"
+               "[summary] block cache, process-wide tickers incl. background: %" PRIu64
+               " hits, %" PRIu64 " misses (%.4f)\n",
+               fgh, fgm, (fgh + fgm) ? static_cast<double>(fgh) / (fgh + fgm) : 0.0,
                hit, miss, (hit + miss) ? static_cast<double>(hit) / (hit + miss) : 0.0);
+  if (flags.row_cache_mb > 0) {
+    const uint64_t rh = ticker(rocksdb::ROW_CACHE_HIT), rm = ticker(rocksdb::ROW_CACHE_MISS);
+    std::fprintf(stderr, "[summary] row cache: %" PRIu64 " hits, %" PRIu64 " misses (%.4f)\n",
+                 rh, rm, (rh + rm) ? static_cast<double>(rh) / (rh + rm) : 0.0);
+  }
   if (adapter != nullptr) {
     const leaper::Stats ls = adapter->stats();
     std::fprintf(stderr,

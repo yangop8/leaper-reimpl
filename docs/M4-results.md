@@ -1,5 +1,22 @@
 # M4 — Baseline matrix
 
+> **Superseded (M8, 2026-09-02).** Every LevelDB number in this file for a
+> policy that prefetches — WarmAll, Leaper, Oracle — was measured while the
+> compaction-path warm hook fired *before* the output file was synced and
+> closed, so those warms failed silently and only flush-path warming took
+> effect. The instrumentation that caught it (prefetch precision, then
+> `warm_FAILED` counters) did not exist when these runs were made. LRU,
+> EagerEvict and IncrementalWarmup are unaffected. The re-measurement is in
+> `docs/M8-review-followup.md`; this file is kept as the record of what was
+> measured and how the defect was found, not as the current result.
+>
+> A second, independent defect (M8, "the sixth defect") also applies to every
+> hit-ratio number here, including LRU, EagerEvict and IncrementalWarmup: the
+> harness counted LevelDB's own compaction input reads as workload block cache
+> lookups. They were about a third of all lookups and nearly all misses, and
+> policies that warm from the compaction thread slow compaction down and so
+> shed part of that denominator. Latencies and QPS are unaffected.
+
 > **Scope note.** These measurements come from a clean-room reimplementation on
 > LevelDB/RocksDB with synthetic workloads and NVMe (slow storage is emulated).
 > The paper's results come from X-Engine, real Tmall and DingTalk traffic, and

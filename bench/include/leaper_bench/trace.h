@@ -10,7 +10,7 @@
 //
 // Record layout (little-endian, packed, 8 bytes):
 //   uint32 t_ms     milliseconds since the measurement window opened
-//   uint32 key_op   (key_index << 2) | op     -- key_index < 2^30
+//   uint32 key_op   (key_index << 2) | op     -- key_index < 2^30; op 3 = scan (seek key)
 //
 // A sidecar "<prefix>.meta" records the run parameters the analysis needs.
 
@@ -24,7 +24,7 @@
 
 namespace leaper_bench {
 
-enum OpType : uint8_t { kOpRead = 0, kOpUpdate = 1, kOpInsert = 2 };
+enum OpType : uint8_t { kOpRead = 0, kOpUpdate = 1, kOpInsert = 2, kOpScan = 3 };
 
 class TraceWriter {
  public:

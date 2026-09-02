@@ -1,5 +1,13 @@
 # M0 — Reproducing the cache invalidation problem on stock LevelDB
 
+> **Hit-ratio caveat (M8, 2026-09-02).** Every block cache hit ratio in this
+> file was measured while the harness counted LevelDB's own compaction input
+> reads as workload lookups (about a third of all lookups, nearly all misses).
+> Hit-ratio *dips around compactions* are therefore partly the compaction
+> thread's own misses, not only the workload's. The counting is fixed and the
+> corrected measurements are in `docs/M8-review-followup.md`, section H.
+> Latencies, QPS and compaction timelines here are unaffected.
+
 > **Scope note.** These measurements come from a clean-room reimplementation on
 > LevelDB/RocksDB with synthetic workloads and NVMe (slow storage is emulated).
 > The paper's results come from X-Engine, real Tmall and DingTalk traffic, and

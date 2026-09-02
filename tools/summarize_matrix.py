@@ -5,13 +5,15 @@ import csv
 import os
 import sys
 
-POLICIES = ["off", "eager_evict", "incremental_warmup", "warm_all",
+POLICIES = ["off", "eager_evict", "incremental_warmup", "warm_all", "warm_flush",
             "flush_only", "flush_and_compaction", "leaper", "leaper_p2only",
-            "oracle"]
+            "leaper_p2only_ssad", "leaper_rowcache", "oracle"]
 LABEL = {"off": "LRU (stock)", "eager_evict": "EagerEvict",
          "incremental_warmup": "IncrementalWarmup", "warm_all": "WarmAll",
+         "warm_flush": "WarmFlushOnly",
          "leaper": "Leaper (both phases)",
          "leaper_p2only": "Leaper (prefetch only)", "oracle": "Oracle",
+         "leaper_p2only_ssad": "Leaper (prefetch, SSAD)", "leaper_rowcache": "Leaper + row cache",
          "flush_only": "kFlushOnly", "flush_and_compaction": "kFlushAndCompaction"}
 
 

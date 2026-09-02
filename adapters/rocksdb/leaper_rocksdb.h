@@ -68,6 +68,7 @@ class Adapter {
   void OnWrite(const rocksdb::Slice& key);
 
   void set_qps(double qps);
+  void set_health(double miss_ratio);
   leaper::Stats stats() const;
   uint64_t warmed_ranges() const;
   uint64_t warm_us() const;
@@ -92,6 +93,7 @@ class Adapter {
 
   mutable std::mutex mu_;
   uint64_t warmed_ = 0, warm_us_ = 0;
+  std::vector<leaper::BlockRef> pending_;  // decided at Begin, warmed at End
 };
 
 }  // namespace leaper_rocksdb

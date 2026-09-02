@@ -1,5 +1,12 @@
 # M5-M7 — Porting to RocksDB
 
+> **Hit-ratio caveat (M8, 2026-09-02).** The hit ratios in this file come
+> from RocksDB's process-wide `BLOCK_CACHE_DATA_*` tickers, which also count
+> compaction input reads and the Leaper listener's own warming scans (the
+> latter register as data misses against Leaper). The harness now counts the
+> workload threads only via `PerfContext`; the corrected matrix is `m7v3` in
+> `docs/M8-review-followup.md`, section H.
+
 > **Scope note.** These measurements come from a clean-room reimplementation on
 > LevelDB/RocksDB with synthetic workloads and NVMe (slow storage is emulated).
 > The paper's results come from X-Engine, real Tmall and DingTalk traffic, and

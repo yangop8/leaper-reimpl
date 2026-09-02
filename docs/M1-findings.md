@@ -64,7 +64,14 @@ any number was worth reporting.
 The split must be chronological, never random: adjacent intervals of the same
 range are near-duplicates, so a random split leaks the label directly.
 
-## Finding — Algorithm 1 does not terminate on these workloads
+## Finding — Algorithm 1 does not terminate on *these synthetic* workloads
+
+> **Correction (M8).** On real traces it does. On three Twitter cache-trace
+> samples the paper's efficiency criterion stops on its own (A* = 300, 190,
+> 60), so the non-termination below is a property of the synthetic access
+> matrix — which reaches a stable occupancy — and not a gap in the algorithm.
+> The sentence in this section calling it "a gap in the published algorithm"
+> is withdrawn; see `docs/M8-review-followup.md`.
 
 The paper's stopping rule is: keep doubling the key range size A while
 `2*Z(2A) > alpha*Z(A)`, with alpha = 0.6. (Algorithm 1 line 2 defines Z as a

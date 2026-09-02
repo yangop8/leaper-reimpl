@@ -1,0 +1,98 @@
+{
+  "range_size": 60,
+  "n_ranges": 4445,
+  "slot_s": 2.0,
+  "history": 6,
+  "gamma": 3,
+  "feature_names": [
+    "read_rate_t-6",
+    "read_rate_t-5",
+    "read_rate_t-4",
+    "read_rate_t-3",
+    "read_rate_t-2",
+    "read_rate_t-1",
+    "write_rate_t-6",
+    "write_rate_t-5",
+    "write_rate_t-4",
+    "write_rate_t-3",
+    "write_rate_t-2",
+    "write_rate_t-1",
+    "hour",
+    "minute",
+    "second",
+    "precursor_rate_0",
+    "precursor_rate_1",
+    "precursor_rate_2"
+  ],
+  "baseline": {
+    "precision": 0.7957300036610979,
+    "recall": 0.794948794948795,
+    "f1": 0.7953392074726756,
+    "auc": 0.5735598043264234,
+    "ap": 0.8195352229544637
+  },
+  "lightgbm": {
+    "precision": 0.7821986531479277,
+    "recall": 0.9994609994609994,
+    "f1": 0.8775829283752375,
+    "auc": 0.6192619459747863,
+    "ap": 0.8522302249899631,
+    "threshold": 0.5,
+    "precision_at_baseline_recall": 0.8083261567368668
+  },
+  "ablation": {
+    "R": {
+      "precision": 0.7819518293693233,
+      "recall": 0.9993262493262494,
+      "f1": 0.8773756306142627,
+      "auc": 0.6097337903374436,
+      "ap": 0.8486096546010188,
+      "threshold": 0.5,
+      "precision_at_baseline_recall": 0.8035247915497862
+    },
+    "R+W": {
+      "precision": 0.7822358207605469,
+      "recall": 0.999056749056749,
+      "f1": 0.8774504416923793,
+      "auc": 0.6228406561807798,
+      "ap": 0.8541579721728269,
+      "threshold": 0.5,
+      "precision_at_baseline_recall": 0.8090583188042393
+    },
+    "R+W+T": {
+      "precision": 0.782279702149468,
+      "recall": 0.999037499037499,
+      "f1": 0.8774706230450587,
+      "auc": 0.6219021514057843,
+      "ap": 0.8536492885702154,
+      "threshold": 0.5,
+      "precision_at_baseline_recall": 0.8079246241961022
+    },
+    "R+W+T+P": {
+      "precision": 0.7821986531479277,
+      "recall": 0.9994609994609994,
+      "f1": 0.8775829283752375,
+      "auc": 0.6192619459747863,
+      "ap": 0.8522302249899631,
+      "threshold": 0.5,
+      "precision_at_baseline_recall": 0.8083261567368668
+    }
+  },
+  "transitions": {
+    "steady_hot": 41296,
+    "death": 10601,
+    "birth": 10652,
+    "steady_cold": 4126
+  },
+  "positive_rate": 0.7790001659628611,
+  "meta": {
+    "source": "/private/tmp/claude-501/-Users-yang-Desktop-repos-Leaper/25d5d479-4c8d-44a4-b7f5-9889aa13a1e5/scratchpad/twitter/cluster029.csv",
+    "threads": "1",
+    "num_keys": "266651",
+    "rows": "1000000",
+    "span_s": "134",
+    "read_ratio": "0.8590",
+    "key_dist": "twitter",
+    "clock_offset_s": "0"
+  }
+}

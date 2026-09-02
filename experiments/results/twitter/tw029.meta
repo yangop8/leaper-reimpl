@@ -1,0 +1,9 @@
+# converted from twitter/cache-trace; op 0=get/gets 1=any write
+source=/private/tmp/claude-501/-Users-yang-Desktop-repos-Leaper/25d5d479-4c8d-44a4-b7f5-9889aa13a1e5/scratchpad/twitter/cluster029.csv
+threads=1
+num_keys=266651
+rows=1000000
+span_s=134
+read_ratio=0.8590
+key_dist=twitter
+clock_offset_s=0

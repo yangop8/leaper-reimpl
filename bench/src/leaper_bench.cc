@@ -54,6 +54,12 @@ struct Flags {
   int threads = 8;
   double read_ratio = 0.75;
   double update_ratio = 0.20;   // remainder is inserts
+  // Range queries. The paper's e-commerce workload is 10% range lookups and
+  // its method "naturally supports both point and range queries"; a harness
+  // that never issues one cannot test that. A scan seeks to a key drawn from
+  // the same distribution as reads and walks forward scan_len records.
+  double scan_ratio = 0.0;      // share of *read* operations that are scans
+  int scan_len = 32;
   double zipf = 0.99;
   double write_rate = 0.0;      // target writes/sec across all threads; 0 = closed loop
   double op_rate = 0.0;         // target total ops/sec across all threads; 0 = unthrottled
@@ -82,6 +88,12 @@ struct Flags {
   // draws each write from the read hot set with probability write_corr and
   // from an independent hot set otherwise.
   double write_corr = 1.0;
+  // Switch the lifecycle workload's shape mid-run. A change detector (SSAD)
+  // can only be tested against a change; a workload that is uniformly
+  // different from training is a different distribution, not a drift.
+  double shift_at_s = 0.0;          // 0 = never
+  int shift_hot_slots = 64;
+  double shift_lifetime_s = 3.0;
   int duration = 180;
   int warmup = 20;
   int stale_after = 10;
@@ -112,6 +124,9 @@ struct Flags {
   std::string key_format = "decimal";
   bool leaper_phase1 = true;
   bool leaper_phase2 = true;
+  double ssad_miss_threshold = 0.0;
+  double ssad_relative = 0.0;
+  int ssad_window = 5;
 };
 
 Flags flags;
@@ -178,6 +193,8 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "threads", &v)) flags.threads = ParseInt("threads", v);
     else if (ParseFlag(a, "read_ratio", &v)) flags.read_ratio = ParseDouble("read_ratio", v);
     else if (ParseFlag(a, "update_ratio", &v)) flags.update_ratio = ParseDouble("update_ratio", v);
+    else if (ParseFlag(a, "scan_ratio", &v)) flags.scan_ratio = ParseDouble("scan_ratio", v);
+    else if (ParseFlag(a, "scan_len", &v)) flags.scan_len = ParseInt("scan_len", v);
     else if (ParseFlag(a, "zipf", &v)) flags.zipf = ParseDouble("zipf", v);
     else if (ParseFlag(a, "write_rate", &v)) flags.write_rate = ParseDouble("write_rate", v);
     else if (ParseFlag(a, "op_rate", &v)) flags.op_rate = ParseDouble("op_rate", v);
@@ -197,6 +214,9 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "life_chain", &v)) flags.life_chain = ParseInt("life_chain", v);
     else if (ParseFlag(a, "life_chain_lag", &v)) flags.life_chain_lag = ParseDouble("life_chain_lag", v);
     else if (ParseFlag(a, "write_corr", &v)) flags.write_corr = ParseDouble("write_corr", v);
+    else if (ParseFlag(a, "shift_at_s", &v)) flags.shift_at_s = ParseDouble("shift_at_s", v);
+    else if (ParseFlag(a, "shift_hot_slots", &v)) flags.shift_hot_slots = ParseInt("shift_hot_slots", v);
+    else if (ParseFlag(a, "shift_lifetime_s", &v)) flags.shift_lifetime_s = ParseDouble("shift_lifetime_s", v);
     else if (ParseFlag(a, "duration", &v)) flags.duration = ParseInt("duration", v);
     else if (ParseFlag(a, "warmup", &v)) flags.warmup = ParseInt("warmup", v);
     else if (ParseFlag(a, "stale_after", &v)) flags.stale_after = ParseInt("stale_after", v);
@@ -225,6 +245,9 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "key_format", &v)) flags.key_format = v;
     else if (ParseFlag(a, "leaper_phase1", &v)) flags.leaper_phase1 = ParseBool("leaper_phase1", v);
     else if (ParseFlag(a, "leaper_phase2", &v)) flags.leaper_phase2 = ParseBool("leaper_phase2", v);
+    else if (ParseFlag(a, "ssad_miss_threshold", &v)) flags.ssad_miss_threshold = ParseDouble("ssad_miss_threshold", v);
+    else if (ParseFlag(a, "ssad_window", &v)) flags.ssad_window = ParseInt("ssad_window", v);
+    else if (ParseFlag(a, "ssad_relative", &v)) flags.ssad_relative = ParseDouble("ssad_relative", v);
     else { std::fprintf(stderr, "unknown flag: %s\n", a); std::exit(2); }
   }
 }
@@ -266,6 +289,7 @@ struct Shared {
 };
 
 void WorkerLoop(Shared* s, int tid) {
+  MarkForegroundThread(true);  // only these threads' cache accesses are the workload's
   std::mt19937_64 rng(flags.seed * 1000003ULL + tid);
   Dynamics dyn;
   dyn.shift_per_s = flags.hotspot_shift;
@@ -287,6 +311,12 @@ void WorkerLoop(Shared* s, int tid) {
   wlife.seed = life.seed ^ 0x5DEECE66DULL;
   KeyChooser write_chooser(flags.num, ParseKeyDist(flags.key_dist), flags.zipf,
                            flags.hotspot + 0.5, dyn, wlife);
+  Lifecycle slife = life;
+  slife.hot_slots = flags.shift_hot_slots;
+  slife.lifetime_s = flags.shift_lifetime_s;
+  slife.seed = life.seed ^ 0x9E3779B97F4A7C15ULL;
+  KeyChooser shifted_chooser(flags.num, ParseKeyDist(flags.key_dist), flags.zipf,
+                             flags.hotspot, dyn, slife);
   Histogram* rh = s->read_hist[tid];
   Histogram* wh = s->write_hist[tid];
   TraceWriter* tw = s->trace.empty() ? nullptr : s->trace[tid];
@@ -326,12 +356,24 @@ void WorkerLoop(Shared* s, int tid) {
     const double elapsed_s = (t0 - s->run_start_us) / 1e6;
     uint64_t idx;
     OpType op;
+    const bool shifted = flags.shift_at_s > 0.0 && elapsed_s >= flags.shift_at_s;
+    KeyChooser& cur = shifted ? shifted_chooser : chooser;
     if (p < flags.read_ratio) {
-      idx = chooser.Next(&rng, elapsed_s);
-      op = kOpRead;
+      idx = cur.Next(&rng, elapsed_s);
       const std::string key = EncodeKey(idx);
+      const bool scan = flags.scan_ratio > 0.0 && pick(rng) < flags.scan_ratio;
+      op = scan ? kOpScan : kOpRead;
       t0 = env->NowMicros();
-      const leveldb::Status st = s->db->Get(ropts, key, &value);
+      leveldb::Status st;
+      if (scan) {
+        leveldb::Iterator* it = s->db->NewIterator(ropts);
+        int n = 0;
+        for (it->Seek(key); it->Valid() && n < flags.scan_len; it->Next()) ++n;
+        st = it->status();
+        delete it;
+      } else {
+        st = s->db->Get(ropts, key, &value);
+      }
       const uint64_t dt = env->NowMicros() - t0;
       if (measuring) {
         rh->Add(dt);
@@ -342,7 +384,7 @@ void WorkerLoop(Shared* s, int tid) {
     } else {
       if (p < flags.read_ratio + flags.update_ratio) {
         idx = (flags.write_corr >= 1.0 || pick(rng) < flags.write_corr)
-                  ? chooser.Next(&rng, elapsed_s)
+                  ? cur.Next(&rng, elapsed_s)
                   : write_chooser.Next(&rng, elapsed_s);
         op = kOpUpdate;
       } else {
@@ -436,6 +478,9 @@ int Run() {
     ao.core.max_prefetch_frac = flags.leaper_max_prefetch_frac;
     ao.core.enable_phase1 = flags.leaper_phase1;
     ao.core.enable_phase2 = flags.leaper_phase2;
+    ao.core.ssad_miss_threshold = flags.ssad_miss_threshold;
+    ao.core.ssad_window = flags.ssad_window;
+    ao.core.ssad_relative = flags.ssad_relative;
     ao.core.precursor_path = flags.precursors;
     ao.core.oracle_path = flags.oracle;
     for (int k = 1; k <= flags.model_steps && !flags.model_prefix.empty(); ++k) {
@@ -545,7 +590,7 @@ int Run() {
         "update_ratio=%.4f\n"
         "write_rate=%.1f\nop_rate=%.1f\nduration_s=%d\ntrace_sample=%.4f\n"
         "cache_mb=%d\nwrite_buffer_mb=%d\nmax_file_mb=%d\nblock_kb=%d\n"
-        "read_delay_us=%d\nseed=%" PRIu64 "\n",
+        "read_delay_us=%d\nseed=%" PRIu64 "\nclock_offset_s=%d\n",
         flags.threads, flags.num, flags.value_size, flags.zipf,
         flags.key_dist.c_str(), flags.hotspot, flags.hotspot_shift, flags.phases,
         flags.phase_period_s, flags.life_range_size, flags.life_hot_slots,
@@ -554,7 +599,7 @@ int Run() {
         flags.read_ratio, flags.update_ratio,
         flags.write_rate, flags.op_rate, flags.duration, flags.trace_sample,
         flags.cache_mb, flags.write_buffer_mb, flags.max_file_mb, flags.block_kb,
-        flags.read_delay_us, flags.seed);
+        flags.read_delay_us, flags.seed, flags.warmup);
     std::fclose(meta);
   }
 
@@ -568,7 +613,9 @@ int Run() {
       "t,qps,read_qps,write_qps,block_lookups,block_hits,hit_ratio,"
       "read_p50_us,read_p95_us,read_p99_us,write_p99_us,"
       "compactions_running,compactions_done,flushes_done,trivial_moves,"
-      "cache_live_mb,cache_stale_mb,stale_ids,sst_files,cache_charge_mb\n");
+      "cache_live_mb,cache_stale_mb,stale_ids,sst_files,cache_charge_mb,"
+      "invalidated_blocks,pf_evicted,pf_used,ssad_suspended,pf_inserted,pf_read_once,"
+      "bg_lookups,bg_hits\n");
 
   // Turn on the emulated device delay only now: the load above must not pay it.
   ReadDelayEnabled().store(true, std::memory_order_relaxed);
@@ -588,6 +635,8 @@ int Run() {
   uint64_t prev_reads = 0, prev_writes = 0, prev_lookups = 0, prev_hits = 0;
   uint64_t prev_comp = 0, prev_flush = 0, prev_move = 0;
   uint64_t base_lookups = 0, base_hits = 0, base_inserts = 0, base_evictions = 0;
+  uint64_t prev_invalidated = 0;
+  double last_miss_ratio = 0.0;
   uint64_t base_comp = 0, base_flush = 0, base_compacted_bytes = 0;
 
   const int total_secs = flags.warmup + flags.duration;
@@ -619,6 +668,10 @@ int Run() {
     if (adapter != nullptr) {
       adapter->set_qps(static_cast<double>(shared.reads.load() + shared.writes.load()) /
                        std::max(1, sec - flags.warmup));
+      // Only once there is a real sample: feeding 0.0 during warmup seeded
+      // the EWMA at zero, so the first genuine miss ratio tripped SSAD for
+      // the rest of the run.
+      if (sec > flags.warmup + 1) adapter->set_health(last_miss_ratio);
     }
     env->SleepForMicroseconds(1000000);
     if (sec <= flags.warmup) continue;
@@ -633,6 +686,9 @@ int Run() {
     const uint64_t d_lookups = cc.lookups - prev_lookups;
     const uint64_t d_hits = cc.hits - prev_hits;
     const double hit_ratio = d_lookups > 0 ? static_cast<double>(d_hits) / d_lookups : 0.0;
+    last_miss_ratio = 1.0 - hit_ratio;
+    leaper::Stats ls_now;
+    if (adapter != nullptr) ls_now = adapter->stats();
     const uint64_t comp = logger->compactions_done();
     const uint64_t flush = logger->flushes_done();
     const uint64_t move = logger->trivial_moves();
@@ -641,14 +697,19 @@ int Run() {
     std::fprintf(csv,
         "%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.5f,"
         "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
-        "%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%.2f,%" PRIu64 ",%" PRIu64 ",%.2f\n",
+        "%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%.2f,%" PRIu64 ",%" PRIu64 ",%.2f,"
+        "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
         t, (reads - prev_reads) + (writes - prev_writes), reads - prev_reads,
         writes - prev_writes, d_lookups, d_hits, hit_ratio,
         Percentile(rcur, rprev, 0.50), Percentile(rcur, rprev, 0.95),
         Percentile(rcur, rprev, 0.99), Percentile(wcur, wprev, 0.99),
         logger->compactions_running(), comp - prev_comp, flush - prev_flush,
         move - prev_move, cc.live_bytes / 1048576.0, cc.stale_bytes / 1048576.0,
-        cc.stale_ids, TotalFiles(db), cache->TotalCharge() / 1048576.0);
+        cc.stale_ids, TotalFiles(db), cache->TotalCharge() / 1048576.0,
+        ls_now.invalidated_blocks - prev_invalidated, cc.pf_evicted, cc.pf_used,
+        ls_now.ssad_suspended ? 1 : 0, cc.pf_inserted, cc.pf_read_once,
+        cc.bg_lookups, cc.bg_hits);
+    prev_invalidated = ls_now.invalidated_blocks;
     std::fflush(csv);
 
     std::fprintf(stderr,
@@ -687,6 +748,8 @@ int Run() {
       "%" PRIu64 " inserts, %" PRIu64 " evictions\n"
       "[summary] background: %" PRIu64 " compactions, %" PRIu64 " flushes, "
       "%" PRIu64 " trivial moves, %.1f MB compacted\n"
+      "[summary] excluded from the above: %" PRIu64 " block cache lookups by LevelDB's "
+      "background thread (%" PRIu64 " hits), %" PRIu64 " by the policy\n"
       "[summary] wrote %s, %s, %s\n",
       cc.lookups - base_lookups, cc.hits - base_hits,
       (cc.lookups - base_lookups)
@@ -696,6 +759,7 @@ int Run() {
       logger->compactions_done() - base_comp, logger->flushes_done() - base_flush,
       logger->trivial_moves(),
       (logger->compacted_bytes() - base_compacted_bytes) / 1048576.0,
+      cc.bg_lookups, cc.bg_hits, cc.internal_lookups,
       csv_path.c_str(), ev_path.c_str(), log_path.c_str());
 
   if (adapter != nullptr) {
@@ -705,12 +769,30 @@ int Run() {
         "[leaper] inferences=%" PRIu64 " inference_us=%" PRIu64 " (%.2f us/inf)\n"
         "[leaper] hot=%" PRIu64 " cold=%" PRIu64 " prefetched=%" PRIu64
         " evicted=%" PRIu64 " refused_budget=%" PRIu64 "\n"
-        "[leaper] warm_calls=%" PRIu64 " warm_us=%" PRIu64 "\n",
+        "[leaper] warm_calls=%" PRIu64 " warm_us=%" PRIu64 " warm_FAILED=%" PRIu64
+        " evict_FAILED=%" PRIu64 "\n"
+        "[leaper] invalidated_blocks=%" PRIu64 " over %" PRIu64 " compactions; "
+        "ssad_suspensions=%" PRIu64 "\n",
         ls.reads_seen, ls.writes_seen, ls.sampled, ls.inferences, ls.inference_us,
         ls.inferences ? static_cast<double>(ls.inference_us) / ls.inferences : 0.0,
         ls.ranges_predicted_hot, ls.ranges_predicted_cold, ls.blocks_prefetched,
         ls.blocks_evicted, ls.prefetch_refused_budget,
-        adapter->warmed_blocks(), adapter->warm_us());
+        adapter->warmed_blocks(), adapter->warm_us(), adapter->warm_failed(),
+        adapter->evict_failed(), ls.invalidated_blocks, ls.compactions_seen,
+        ls.ssad_suspensions);
+    if (adapter->warm_failed() > 0) {
+      std::fprintf(stderr, "[leaper] WARNING: %" PRIu64 " of %" PRIu64
+                   " warm calls failed to open the table; prefetch results are invalid\n",
+                   adapter->warm_failed(), adapter->warmed_blocks());
+    }
+  }
+  {
+    const CacheCounters fin = cache->Snapshot(0);
+    std::fprintf(stderr, "[cache] prefetched blocks inserted=%" PRIu64 " read at least once=%" PRIu64
+                 " (prefetch precision %.3f); evicted=%" PRIu64 " of which read=%" PRIu64 "\n",
+                 fin.pf_inserted, fin.pf_read_once,
+                 fin.pf_inserted ? static_cast<double>(fin.pf_read_once) / fin.pf_inserted : 0.0,
+                 fin.pf_evicted, fin.pf_used);
   }
   for (auto* h : shared.read_hist) delete h;
   for (auto* h : shared.write_hist) delete h;

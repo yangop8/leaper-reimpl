@@ -27,3 +27,4 @@ max_file_mb=4
 block_kb=4
 read_delay_us=200
 seed=42
+clock_offset_s=30

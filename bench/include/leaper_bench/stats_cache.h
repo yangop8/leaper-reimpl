@@ -41,8 +41,25 @@ struct CacheCounters {
   uint64_t stale_bytes = 0;  // resident bytes of cache_ids idle > threshold
   uint64_t stale_ids = 0;
   uint64_t internal_lookups = 0;   // Leaper's own probes, excluded above
+  uint64_t bg_lookups = 0;         // LevelDB's own background reads, excluded above
+  uint64_t bg_hits = 0;
   uint64_t prefetch_inserts = 0;   // cache inserts caused by prefetching
+  uint64_t pf_evicted = 0;         // prefetched blocks that have left the cache
+  uint64_t pf_used = 0;            // ... of which were read at least once
+  uint64_t pf_inserted = 0;        // prefetched blocks inserted (tracking mode)
+  uint64_t pf_read_once = 0;       // ... of which read at least once, resident or not
 };
+
+// Only the workload's threads count. LevelDB's compaction thread reads every
+// input block through Table::BlockReader too (fill_cache=false only stops the
+// insert; table/table.cc:177 looks the cache up regardless), and on a run
+// with 57 compactions those reads were a third of all lookups -- nearly all
+// misses. Worse, a policy that warms blocks from the compaction thread slows
+// compaction down and so removes lookups from the denominator: WarmAll
+// halved the compaction count and gained ~2pp of "hit ratio" from that alone.
+// The paper's hit ratio is over user requests, so that is what is counted.
+void MarkForegroundThread(bool foreground);
+bool InForegroundThread();
 
 class StatsCache : public leveldb::Cache {
  public:
@@ -70,7 +87,9 @@ class StatsCache : public leveldb::Cache {
     insert_bytes_.fetch_add(charge, std::memory_order_relaxed);
     if (!track_) return target_->Insert(key, value, charge, deleter);
 
-    Entry* e = new Entry{value, deleter, this, CacheIdOf(key), charge};
+    const bool pf = leaper::InInternalCacheAccess();
+    if (pf) pf_inserted_.fetch_add(1, std::memory_order_relaxed);
+    Entry* e = new Entry{value, deleter, this, CacheIdOf(key), charge, pf};
     live_[Slot(e->cache_id)].fetch_add(charge, std::memory_order_relaxed);
     live_total_.fetch_add(charge, std::memory_order_relaxed);
     return target_->Insert(key, e, charge, &StatsCache::Dispatch);
@@ -83,11 +102,26 @@ class StatsCache : public leveldb::Cache {
       internal_lookups_.fetch_add(1, std::memory_order_relaxed);
       return target_->Lookup(key);
     }
+    if (!InForegroundThread()) {
+      bg_lookups_.fetch_add(1, std::memory_order_relaxed);
+      Handle* h = target_->Lookup(key);
+      if (h != nullptr) bg_hits_.fetch_add(1, std::memory_order_relaxed);
+      return h;
+    }
     lookups_.fetch_add(1, std::memory_order_relaxed);
     Handle* h = target_->Lookup(key);
     if (h != nullptr) {
       hits_.fetch_add(1, std::memory_order_relaxed);
       if (track_) {
+        Entry* e = static_cast<Entry*>(target_->Value(h));
+        // First read of a prefetched block settles its precision now, not at
+        // eviction: a block that is prefetched, read, and still resident when
+        // the run ends would otherwise never be counted. On one run Leaper's
+        // 31,490 prefetched blocks were all still resident at the end -- every
+        // one of them read -- and the eviction-time metric reported 0/0.
+        if (e->prefetched && e->hits.fetch_add(1, std::memory_order_relaxed) == 0) {
+          pf_read_once_.fetch_add(1, std::memory_order_relaxed);
+        }
         last_hit_[Slot(CacheIdOf(key))].store(now_secs_.load(std::memory_order_relaxed),
                                               std::memory_order_relaxed);
       }
@@ -131,7 +165,13 @@ class StatsCache : public leveldb::Cache {
     c.evicted_bytes = evicted_bytes_.load(std::memory_order_relaxed);
     c.live_bytes = live_total_.load(std::memory_order_relaxed);
     c.internal_lookups = internal_lookups_.load(std::memory_order_relaxed);
+    c.bg_lookups = bg_lookups_.load(std::memory_order_relaxed);
+    c.bg_hits = bg_hits_.load(std::memory_order_relaxed);
     c.prefetch_inserts = prefetch_inserts_.load(std::memory_order_relaxed);
+    c.pf_evicted = pf_evicted_.load(std::memory_order_relaxed);
+    c.pf_used = pf_used_.load(std::memory_order_relaxed);
+    c.pf_inserted = pf_inserted_.load(std::memory_order_relaxed);
+    c.pf_read_once = pf_read_once_.load(std::memory_order_relaxed);
     if (track_) {
       const uint64_t now = now_secs_.load(std::memory_order_relaxed);
       for (size_t i = 0; i < live_.size(); ++i) {
@@ -154,6 +194,8 @@ class StatsCache : public leveldb::Cache {
     StatsCache* owner;
     uint64_t cache_id;
     size_t charge;
+    bool prefetched;                 // inserted by a policy, not by a read
+    std::atomic<uint32_t> hits{0};   // workload hits before eviction
   };
 
   // cache_ids come from Cache::NewId(), i.e. a dense increasing sequence, so
@@ -174,6 +216,14 @@ class StatsCache : public leveldb::Cache {
     self->evicted_bytes_.fetch_add(e->charge, std::memory_order_relaxed);
     self->live_[Slot(e->cache_id)].fetch_sub(e->charge, std::memory_order_relaxed);
     self->live_total_.fetch_sub(e->charge, std::memory_order_relaxed);
+    // Prefetch precision, measured at the only moment it is knowable: when a
+    // prefetched block leaves the cache, was it ever read while resident?
+    if (e->prefetched) {
+      self->pf_evicted_.fetch_add(1, std::memory_order_relaxed);
+      if (e->hits.load(std::memory_order_relaxed) > 0) {
+        self->pf_used_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     e->deleter(key, e->value);
     delete e;
   }
@@ -186,10 +236,20 @@ class StatsCache : public leveldb::Cache {
   std::atomic<uint64_t> evictions_{0}, evicted_bytes_{0}, live_total_{0};
   std::atomic<uint64_t> now_secs_{0};
   std::atomic<uint64_t> internal_lookups_{0}, prefetch_inserts_{0};
+  std::atomic<uint64_t> bg_lookups_{0}, bg_hits_{0};
+  std::atomic<uint64_t> pf_evicted_{0}, pf_used_{0};
+  std::atomic<uint64_t> pf_inserted_{0}, pf_read_once_{0};
 
   std::vector<std::atomic<uint64_t>> live_;
   std::vector<std::atomic<uint64_t>> last_hit_;
 };
+
+inline bool& ForegroundFlag() {
+  thread_local bool flag = false;
+  return flag;
+}
+inline void MarkForegroundThread(bool foreground) { ForegroundFlag() = foreground; }
+inline bool InForegroundThread() { return ForegroundFlag(); }
 
 }  // namespace leaper_bench
 

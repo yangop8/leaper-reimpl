@@ -29,6 +29,11 @@ def main():
     ap.add_argument("--slot_offset", type=int, default=0,
                     help="intervals to add so trace time matches plug-in time "
                          "(normally warmup / slot_s)")
+    ap.add_argument("--lookahead", type=int, default=1,
+                    help="hot set for interval s is the union of intervals s..s+W-1. "
+                         "W=1 is the paper's prediction target; larger W approaches "
+                         "a hindsight policy that warms whatever will be read while "
+                         "the block would still be resident")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -48,7 +53,7 @@ def main():
     key = np.concatenate(key_all)
     op = np.concatenate(op_all)
 
-    is_read = op == 0
+    is_read = (op == 0) | (op == 3)
     slot = (t_ms[is_read] // int(args.slot_s * 1000)).astype(np.int64) + args.slot_offset
     rid = key[is_read] // args.range_size
 
@@ -58,15 +63,23 @@ def main():
     keep[1:] = (slot[1:] != slot[:-1]) | (rid[1:] != rid[:-1])
     slot, rid = slot[keep], rid[keep]
 
+    # Per-interval sets, then union W consecutive intervals per output slot.
+    per = {}
+    start = 0
+    while start < len(slot):
+        end = start
+        while end < len(slot) and slot[end] == slot[start]:
+            end += 1
+        per[int(slot[start])] = set(int(r) for r in rid[start:end])
+        start = end
+    W = max(1, args.lookahead)
     with open(args.out, "w") as f:
-        f.write("# slot range... : ranges actually read in that interval\n")
-        start = 0
-        while start < len(slot):
-            end = start
-            while end < len(slot) and slot[end] == slot[start]:
-                end += 1
-            f.write(f"{slot[start]} " + " ".join(str(int(r)) for r in rid[start:end]) + "\n")
-            start = end
+        f.write(f"# slot range... : ranges read in intervals [slot, slot+{W})\n")
+        for s0 in sorted(per):
+            u = set()
+            for k in range(W):
+                u |= per.get(s0 + k, set())
+            f.write(f"{s0} " + " ".join(str(r) for r in sorted(u)) + "\n")
     print(f"wrote {args.out}: {len(np.unique(slot))} intervals, "
           f"{len(slot)} (interval, range) pairs")
 

@@ -1,0 +1,6 @@
+engine=rocksdb
+num_keys=4000000
+life_range_size=40000
+life_chain=4
+seed=42
+threads=4
