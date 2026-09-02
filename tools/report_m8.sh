@@ -82,3 +82,49 @@ done
 sec "G6 scans v2"
 $PY tools/summarize_matrix.py $OUT m4_scan_v2 | grep -v missing
 $PY tools/paper_metrics.py $OUT m4_scan_v2 --t2=2 | sed -n '5,12p'
+
+# ---------------------------------------------------------------------------
+# H: the corrected measurements (compaction-path warming working, workload
+# threads only in the hit ratio). Everything above is superseded by these.
+# ---------------------------------------------------------------------------
+echo; echo "=============== H: corrected measurements (v3) ==============="
+sec "H1 slow storage, 64 MB (m4_slow_v3)"
+$PY tools/summarize_matrix.py $OUT m4_slow_v3 | grep -v missing
+$PY tools/paper_metrics.py $OUT m4_slow_v3 --t2=2 | sed -n '3,14p'
+sec "H2 NVMe, 128 MB (m4_nvme_v3)"
+$PY tools/summarize_matrix.py $OUT m4_nvme_v3 | grep -v missing
+$PY tools/paper_metrics.py $OUT m4_nvme_v3 --t2=2 | sed -n '3,14p'
+sec "H3 oracle lookahead, slow storage"
+for W in 1 5 20; do
+  f=$OUT/m4_slow_v3_oracle_w$W.timeseries.csv
+  [ -f "$f" ] && awk -F, -v w=$W 'NR>1{h+=$6;l+=$5;c+=$13} END{printf "  oracle W=%2s: hit ratio %.2f%%  compactions %d\n", w, 100*h/l, c}' "$f"
+done
+sec "H4 zipf sweep, slow storage"
+printf "%-6s %-10s %-10s %-10s\n" zipf LRU WarmAll Leaper
+for Z in 0.0 0.3 0.5 0.9 0.99; do
+  printf "%-6s " $Z
+  for P in off warm_all leaper_p2only; do
+    f=$OUT/m4_zipf${Z}_v3_$P.timeseries.csv
+    [ -f "$f" ] && awk -F, 'NR>1{h+=$6;l+=$5} END{printf "%9.2f%% ", 100*h/l}' "$f" || printf "  (miss)   "
+  done; echo
+done
+sec "H5/H7 shift at t=120s and SSAD (m4_drift_v3, relative 0.3; _ssad01: 0.1)"
+$PY tools/summarize_matrix.py $OUT m4_drift_v3 | grep -v missing
+for F in m4_drift_v3_off m4_drift_v3_warm_all m4_drift_v3_leaper_p2only m4_drift_v3_leaper_p2only_ssad m4_drift_v3_ssad01_leaper_p2only_ssad; do
+  f=$OUT/$F.timeseries.csv
+  [ -f "$f" ] && awk -F, -v p=$F 'NR>1 && $1<=120{h1+=$6;l1+=$5} NR>1 && $1>120{h2+=$6;l2+=$5;s+=$24} END{printf "  %-42s before %.2f%%  after %.2f%%  suspended %d s\n", p, 100*h1/l1, 100*h2/l2, s}' "$f"
+done
+sec "H6 scans, slow storage (m4_scan_v3)"
+$PY tools/summarize_matrix.py $OUT m4_scan_v3 | grep -v missing
+$PY tools/paper_metrics.py $OUT m4_scan_v3 --t2=2 | sed -n '5,10p'
+sec "H8 same-seed repeats (m4_slow_v3r, m4_nvme_v3r)"
+for T in m4_slow_v3r m4_nvme_v3r; do $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -E "LRU|WarmAll|Leaper \(prefetch only"; done
+sec "H10 cache size: slow 128/256 MB, NVMe 64 MB"
+for T in m4_slow128_v3 m4_slow256_v3 m4_nvme64_v3; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T | grep -v missing | sed -n '3,7p'; $PY tools/paper_metrics.py $OUT $T --t2=2 | sed -n '5,9p'; done
+sec "H11 warm from a separate thread (m4_slow_v3a, m4_zipf0.99_v3a)"
+for T in m4_slow_v3a m4_zipf0.99_v3a; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,8p'; done
+sec "H12/H13 RocksDB (m7v3; scan 40000/12000 keys per range)"
+$PY tools/summarize_matrix.py $OUT m7v3 | grep -v missing
+for K in 40000 12000; do f=$OUT/m7v3_scan${K}_leaper.timeseries.csv; [ -f "$f" ] && awk -F, -v k=$K 'NR>1{h+=$6;l+=$5} END{printf "  leaper, warm_scan_keys=%s: hit ratio %.2f%%\n", k, 100*h/l}' "$f"; done
+sec "H14 hot lifetime: slow 128 MB / 40 s, NVMe 128 MB / 2 s"
+for T in m4_slow128_life40 m4_nvme_life2; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,7p'; done

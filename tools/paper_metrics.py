@@ -66,7 +66,7 @@ def summarise(prefix, t2, k):
            "miss_in": 0, "miss_all": 0, "look_in": 0, "look_all": 0,
            "miss_out": 0, "look_out": 0,
            "spikes": sum(1 for v in p95 if med and v > k * med),
-           "inval": 0, "p99_all": [], "pf_prec": None}
+           "inval": 0, "p99_all": [], "pf_prec": None, "pf_inserted": 0}
     for r in ts:
         t = float(r["t"])
         look = float(r["block_lookups"]); hit = float(r["block_hits"])
@@ -82,10 +82,19 @@ def summarise(prefix, t2, k):
             out["miss_out"] += miss; out["look_out"] += look
         if "invalidated_blocks" in r:
             out["inval"] += float(r["invalidated_blocks"] or 0)
-        if "pf_inserted" in r and float(r["pf_inserted"] or 0) > 0:
-            out["pf_prec"] = float(r["pf_read_once"]) / float(r["pf_inserted"])
-        elif "pf_evicted" in r and float(r["pf_evicted"] or 0) > 0:
-            out["pf_prec"] = float(r["pf_used"]) / float(r["pf_evicted"])
+    # The pf_* counters are cumulative since process start and so include
+    # blocks warmed while the database was being filled and during warmup;
+    # those are never read in the measured window and would deflate the
+    # precision (WarmAll: 111k of 406k on one run). Use the measured window's
+    # own deltas, taking the first row as the baseline.
+    first, last = ts[0], ts[-1]
+    def delta(k):
+        return float(last.get(k) or 0) - float(first.get(k) or 0)
+    if "pf_inserted" in last and delta("pf_inserted") > 0:
+        out["pf_inserted"] = delta("pf_inserted")
+        out["pf_prec"] = delta("pf_read_once") / delta("pf_inserted")
+    elif "pf_evicted" in last and delta("pf_evicted") > 0:
+        out["pf_prec"] = delta("pf_used") / delta("pf_evicted")
     return out
 
 
@@ -114,8 +123,8 @@ def main():
     print(f"\n{args.tag}: windows = [op begin, op end + {args.t2:.0f}s], "
           f"{base['win_secs']}/{base['secs']} s inside windows for the stock run\n")
     print(f"{'policy':<20} {'miss rate win':>14} {'vs stock':>9} {'hit in win':>11} {'hit out':>8} "
-          f"{'spikes':>7} {'QPS out':>9} {'overhead':>9} {'inval blk':>10} {'pf prec':>8}")
-    print("-" * 115)
+          f"{'spikes':>7} {'QPS out':>9} {'overhead':>9} {'inval blk':>10} {'warmed':>8} {'pf prec':>8}")
+    print("-" * 124)
     for p, r in rows.items():
         qps_out = statistics.mean(r["qps_out"]) if r["qps_out"] else float("nan")
         rate_in = r["miss_in"] / r["look_in"] if r["look_in"] else float("nan")
@@ -125,7 +134,8 @@ def main():
         ovh = 100.0 * (qps_out / b_qps_out - 1) if b_qps_out == b_qps_out and b_qps_out else float("nan")
         pf = f"{r['pf_prec']:.3f}" if r["pf_prec"] is not None else "-"
         print(f"{p:<20} {100 * rate_in:>13.2f}% {d_miss:>+8.1f}% {hit_in:>10.2f}% {hit_out:>7.2f}% "
-              f"{r['spikes']:>7d} {qps_out:>9,.0f} {ovh:>+8.2f}% {r['inval']:>10,.0f} {pf:>8}")
+              f"{r['spikes']:>7d} {qps_out:>9,.0f} {ovh:>+8.2f}% {r['inval']:>10,.0f} "
+              f"{r['pf_inserted']:>8,.0f} {pf:>8}")
     print()
     print("miss rate win / vs stock : the paper's 'cache misses eliminated' (Table 4), as a rate")
     print("hit out                  : hit ratio outside the windows -- where prefetched blocks pay off")
@@ -133,7 +143,8 @@ def main():
     print("QPS out / overhead       : the paper's overhead measure -- QPS outside background-op windows,")
     print("                           relative to stock. Only meaningful for unthrottled runs.")
     print("inval blk                : |C ∩ M_i| summed over compactions (Formulation 2)")
-    print("pf prec                  : share of prefetched blocks read at least once (resident or evicted)")
+    print("warmed / pf prec         : blocks prefetched in the measured window, and the share of them read")
+    print("                           at least once (resident or evicted)")
 
 
 if __name__ == "__main__":

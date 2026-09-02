@@ -45,6 +45,7 @@ class Adapter::CacheBridge : public leaper::CacheOps {
 
  private:
   uint64_t FileSize(uint64_t file_number) const {
+    std::lock_guard<std::mutex> lock(a_->fs_mu_);
     auto it = a_->file_sizes_.find(file_number);
     return it == a_->file_sizes_.end() ? 0 : it->second;
   }
@@ -63,10 +64,46 @@ std::unique_ptr<Adapter> Adapter::Create(const AdapterOptions& opts,
   a->core_ = leaper::Leaper::Open(opts.core, a->mapper_.get(), a->bridge_.get(),
                                   error);
   if (a->core_ == nullptr) return nullptr;
+  a->warm_async_ = opts.warm_async;
+  if (a->warm_async_) {
+    Adapter* raw = a.get();
+    a->warm_thread_ = std::thread([raw] { raw->WarmLoop(); });
+  }
   return a;
 }
 
-Adapter::~Adapter() = default;
+Adapter::~Adapter() { Shutdown(); }
+
+void Adapter::Shutdown() {
+  {
+    std::lock_guard<std::mutex> lock(wq_mu_);
+    wq_stop_ = true;
+    warm_queue_.clear();
+  }
+  wq_cv_.notify_all();
+  if (warm_thread_.joinable()) warm_thread_.join();
+}
+
+void Adapter::WarmBatch(const std::vector<leaper::BlockRef>& warm) {
+  const uint64_t t0 = MonotonicUs();
+  for (const leaper::BlockRef& r : warm) bridge_->Prefetch(r);
+  warm_us_.fetch_add(MonotonicUs() - t0, std::memory_order_relaxed);
+  warmed_.fetch_add(warm.size(), std::memory_order_relaxed);
+}
+
+void Adapter::WarmLoop() {
+  for (;;) {
+    std::vector<leaper::BlockRef> batch;
+    {
+      std::unique_lock<std::mutex> lock(wq_mu_);
+      wq_cv_.wait(lock, [this] { return wq_stop_ || !warm_queue_.empty(); });
+      if (wq_stop_) return;
+      batch = std::move(warm_queue_.front());
+      warm_queue_.pop_front();
+    }
+    WarmBatch(batch);
+  }
+}
 
 void Adapter::Bind(leveldb::LeaperEngineOps* ops) { ops_ = ops; }
 
@@ -159,7 +196,10 @@ void Adapter::OnOutputFileFinished(uint64_t file_number, uint64_t file_size) {
   std::vector<leaper::BlockRef> warm;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    file_sizes_[file_number] = file_size;
+    {
+      std::lock_guard<std::mutex> fl(fs_mu_);
+      file_sizes_[file_number] = file_size;
+    }
     for (leaper::BlockRef& r : pending_warm_) {
       if (r.file_id == file_number) warm.push_back(r);
     }
@@ -171,10 +211,15 @@ void Adapter::OnOutputFileFinished(uint64_t file_number, uint64_t file_size) {
         pending_warm_.end());
   }
   if (warm.empty()) return;
-  const uint64_t t0 = MonotonicUs();
-  for (const leaper::BlockRef& r : warm) bridge_->Prefetch(r);
-  warm_us_ += MonotonicUs() - t0;
-  warmed_ += warm.size();
+  if (warm_async_) {
+    {
+      std::lock_guard<std::mutex> lock(wq_mu_);
+      warm_queue_.push_back(std::move(warm));
+    }
+    wq_cv_.notify_one();
+    return;
+  }
+  WarmBatch(warm);
 }
 
 void Adapter::OnCompactionEnd() {
@@ -186,6 +231,7 @@ void Adapter::OnFileObsolete(uint64_t file_number, uint64_t file_size) {
   if (ops_ == nullptr) return;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::mutex> fl(fs_mu_);
     if (file_size > 0) file_sizes_[file_number] = file_size;
   }
   std::vector<leaper::BlockRef> blocks;
@@ -199,6 +245,7 @@ void Adapter::OnFileObsolete(uint64_t file_number, uint64_t file_size) {
                          });
   core_->OnFileObsolete(file_number, blocks);
   std::lock_guard<std::mutex> lock(mu_);
+  std::lock_guard<std::mutex> fl(fs_mu_);
   file_sizes_.erase(file_number);
 }
 

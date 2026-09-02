@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/yang/Desktop/repos/Leaper/build-async/cmake_install.cmake",
+		"/Users/yang/Desktop/repos/Leaper/build-async/third_party/leveldb/cmake_install.cmake",
+		"/Users/yang/Desktop/repos/Leaper/build-async/leaper/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -123,6 +123,7 @@ struct Flags {
   double leaper_max_prefetch_frac = 1.0;  // no cap by default: WarmAll must mean warm all
   std::string key_format = "decimal";
   bool leaper_phase1 = true;
+  bool warm_async = false;   // warm from a dedicated thread instead of the compaction thread
   bool leaper_phase2 = true;
   double ssad_miss_threshold = 0.0;
   double ssad_relative = 0.0;
@@ -244,6 +245,7 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "leaper_max_prefetch_frac", &v)) flags.leaper_max_prefetch_frac = ParseDouble("leaper_max_prefetch_frac", v);
     else if (ParseFlag(a, "key_format", &v)) flags.key_format = v;
     else if (ParseFlag(a, "leaper_phase1", &v)) flags.leaper_phase1 = ParseBool("leaper_phase1", v);
+    else if (ParseFlag(a, "warm_async", &v)) flags.warm_async = ParseBool("warm_async", v);
     else if (ParseFlag(a, "leaper_phase2", &v)) flags.leaper_phase2 = ParseBool("leaper_phase2", v);
     else if (ParseFlag(a, "ssad_miss_threshold", &v)) flags.ssad_miss_threshold = ParseDouble("ssad_miss_threshold", v);
     else if (ParseFlag(a, "ssad_window", &v)) flags.ssad_window = ParseInt("ssad_window", v);
@@ -477,6 +479,7 @@ int Run() {
     ao.core.cache_bytes = static_cast<double>(flags.cache_mb) * 1024 * 1024;
     ao.core.max_prefetch_frac = flags.leaper_max_prefetch_frac;
     ao.core.enable_phase1 = flags.leaper_phase1;
+    ao.warm_async = flags.warm_async;
     ao.core.enable_phase2 = flags.leaper_phase2;
     ao.core.ssad_miss_threshold = flags.ssad_miss_threshold;
     ao.core.ssad_window = flags.ssad_window;
@@ -635,6 +638,11 @@ int Run() {
   uint64_t prev_reads = 0, prev_writes = 0, prev_lookups = 0, prev_hits = 0;
   uint64_t prev_comp = 0, prev_flush = 0, prev_move = 0;
   uint64_t base_lookups = 0, base_hits = 0, base_inserts = 0, base_evictions = 0;
+  // The prefetch and background counters are cumulative from DB::Open too;
+  // blocks warmed while filling the database or during warmup are never read
+  // in the measured window and would deflate the precision, so the CSV
+  // carries the measured window's own deltas.
+  CacheCounters base_cc;
   uint64_t prev_invalidated = 0;
   double last_miss_ratio = 0.0;
   uint64_t base_comp = 0, base_flush = 0, base_compacted_bytes = 0;
@@ -657,6 +665,7 @@ int Run() {
       prev_hits = warm.hits;
       base_lookups = warm.lookups;
       base_hits = warm.hits;
+      base_cc = warm;
       base_inserts = warm.inserts;
       base_evictions = warm.evictions;
       prev_comp = base_comp = logger->compactions_done();
@@ -706,9 +715,11 @@ int Run() {
         logger->compactions_running(), comp - prev_comp, flush - prev_flush,
         move - prev_move, cc.live_bytes / 1048576.0, cc.stale_bytes / 1048576.0,
         cc.stale_ids, TotalFiles(db), cache->TotalCharge() / 1048576.0,
-        ls_now.invalidated_blocks - prev_invalidated, cc.pf_evicted, cc.pf_used,
-        ls_now.ssad_suspended ? 1 : 0, cc.pf_inserted, cc.pf_read_once,
-        cc.bg_lookups, cc.bg_hits);
+        ls_now.invalidated_blocks - prev_invalidated,
+        cc.pf_evicted - base_cc.pf_evicted, cc.pf_used - base_cc.pf_used,
+        ls_now.ssad_suspended ? 1 : 0,
+        cc.pf_inserted - base_cc.pf_inserted, cc.pf_read_once - base_cc.pf_read_once,
+        cc.bg_lookups - base_cc.bg_lookups, cc.bg_hits - base_cc.bg_hits);
     prev_invalidated = ls_now.invalidated_blocks;
     std::fflush(csv);
 
@@ -796,6 +807,7 @@ int Run() {
   }
   for (auto* h : shared.read_hist) delete h;
   for (auto* h : shared.write_hist) delete h;
+  if (adapter != nullptr) adapter->Shutdown();  // the warm thread reads through the DB
   delete db;
   delete opts.filter_policy;
   delete cache;   // also deletes the wrapped LRU cache

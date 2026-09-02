@@ -411,3 +411,260 @@ G5.
 | Leaper | 0 of 21,217 warm calls landed | — | — |
 
 The Leaper row is what exposed the defect above.
+
+## H — the corrected measurements
+
+Tags `_v3`: compaction-path warming works (fifth defect) and the hit ratio
+counts the workload threads only (sixth defect). Same protocol as M4: models
+trained on seed 42, every policy evaluated on seed 1234 from a freshly
+filled database. Three things to keep in mind when reading the tables:
+
+* **EagerEvict is the floor for every warming policy.** All policies except
+  stock reclaim the block cache entries of deleted SSTs, so the value of
+  *warming* is a policy's distance from EagerEvict, not from LRU.
+* **Warming is done by the compaction thread**, one emulated read (200 us on
+  "slow storage", ~10 us on NVMe) per block, before the compaction moves on.
+  The `comps` column is how many compactions finished in the measured window;
+  when it drops, the warm reads are why. Section H11 charges the same cost to
+  a separate thread instead, which brackets it from the other side.
+* **`bg lk`** is the share of all block cache lookups made by LevelDB's own
+  background thread — the part the sixth defect was counting.
+
+### H1 — slow storage, 64 MB cache (the paper's regime)
+
+200 us per read, 8,000 ops/s, 75/20/5 read/update/insert, 180 s.
+
+| policy | hit ratio | vs LRU | vs EagerEvict | p99 us | comps | blocks warmed | read at least once |
+|---|---|---|---|---|---|---|---|
+| LRU | 45.69% | — | — | 282 | 59 | — | — |
+| EagerEvict | 46.54% | +0.85pp | — | 287 | 59 | — | — |
+| IncrementalWarmup | 42.98% | -2.71pp | -3.56pp | 298 | 41 | 273k | 4.5% |
+| WarmAll | 43.27% | -2.42pp | -3.27pp | 296 | 36 | 340k | 3.2% |
+| WarmFlushOnly (= RocksDB kFlushOnly) | **47.01%** | **+1.32pp** | +0.47pp | 291 | 59 | 7.8k | 2.2% |
+| Leaper (both phases) | 46.29% | +0.59pp | -0.25pp | 337 | 56 | 43k | 11.6% |
+| Leaper (prefetch only) | 46.56% | +0.87pp | +0.02pp | 292 | 58 | 37k | 12.1% |
+| Oracle (W=1) | 46.02% | +0.33pp | -0.52pp | 325 | 50 | 153k | 10.7% |
+
+"Blocks warmed" and the precision are for the measured window only; the
+policies also warm during the database fill and the warmup, and those blocks
+are never read (WarmAll: 66k of its 406k cumulative).
+
+In the paper's own terms (miss rate inside "during and after compaction"
+windows, T2 = 2 s): stock 54.70%; EagerEvict eliminates 2.0% of those misses,
+Leaper (prefetch only) 1.8%, the oracle 0.5%, WarmAll adds 4.8%. No policy
+produced a latency spike (p95 > 2x median) in this regime.
+
+Read against the floor, **warming buys nothing here**: Leaper's prefetch is
+exactly neutral, the oracle's costs half a point, and warming everything costs
+three. The reason is in the last three columns. A 64 MB cache holds ~16k
+blocks; WarmAll pushes 340k through it in 180 s, of which 3.2% are ever read,
+and each of those 340k reads is 200 us on the compaction thread, which is why
+it finishes 36 compactions where stock finishes 59. Leaper warms 9x fewer
+blocks at 4x the precision and so does no damage — but 12% precision is not
+enough to gain anything either, because the block it warms is usually evicted
+by the time its range is read.
+
+The best policy in this regime warms almost nothing: **flush outputs only**,
+7.8k blocks in 180 s, 2.2% of them read — but the ones that are read are the
+keys the workload just wrote, i.e. the hottest blocks there are, each hit
+dozens of times. It is +0.45pp over Leaper (prefetch only), above the ~0.3pp
+run-to-run noise (H9) but not by much, and it costs nothing: no model, no
+collector, and no compaction slowdown. This is what RocksDB ships as
+`prepopulate_block_cache=kFlushOnly`, and it is the same policy that the
+fifth defect had silently reduced "WarmAll" to in every measurement before
+this section — which is why "WarmAll" used to look so strong.
+
+### H2 — NVMe, 128 MB cache
+
+No emulated delay, 40,000 ops/s, 300 s.
+
+| policy | hit ratio | vs LRU | vs EagerEvict | p99 us | comps | prefetch precision | spikes |
+|---|---|---|---|---|---|---|---|
+| LRU | 83.34% | — | — | 31 | 252 | — | 0 |
+| EagerEvict | 83.68% | +0.33pp | — | 30 | 252 | — | 0 |
+| IncrementalWarmup | 84.07% | +0.72pp | +0.39pp | 31 | 254 | 0.218 | 0 |
+| WarmAll | 83.48% | +0.14pp | -0.19pp | **55** | 252 | 0.144 | **30** |
+| WarmFlushOnly | 83.69% | +0.34pp | +0.01pp | 29 | 253 | 0.085 | 0 |
+| Leaper (both phases) | 86.63% | +3.28pp | +2.95pp | 32 | 253 | 0.744 | 0 |
+| Leaper (prefetch only) | **86.57%** | **+3.23pp** | +2.90pp | 30 | 254 | 0.731 | 0 |
+| Oracle (W=1) | 88.79% | +5.45pp | +5.12pp | 28 | 253 | 0.883 | 0 |
+
+Misses inside compaction windows: Leaper eliminates 6.1% of stock's, the
+oracle 16.6%, WarmAll adds 1.4% and is the only policy with latency spikes.
+
+This is the paper's result, in this setup: **selection beats both warming
+everything and warming nothing, by about three points of hit ratio, with an
+oracle showing two more points of headroom.** Warm reads are cheap here, so
+compaction throughput is untouched by any policy (`comps` 252-254); what
+separates the policies is purely what they put in the cache, and Leaper's
+prefetched blocks are read 73% of the time against WarmAll's 14%. Flush-only
+warming, the winner on slow storage, is worth nothing here: the cache is
+large enough that the just-written keys are still resident from their own
+writes' reads.
+
+Whether the difference from H1 is the device or the cache size is the
+question H10 answers.
+
+### H3 — oracle lookahead, slow storage
+
+| lookahead W | hit ratio | comps |
+|---|---|---|
+| 1 (the paper's prediction target) | 46.20% | 56 |
+| 5 | 45.98% | 51 |
+| 20 | 44.65% | 45 |
+
+Before the sixth defect was fixed this table read the other way round
+(38.68 / 38.96 / 39.19), and "selection needs twenty intervals of foresight"
+was a conclusion of this document. It was the compaction-slowdown artefact:
+the more the oracle warms, the fewer compactions complete, the more compaction
+reads leave the denominator. Counted correctly, warming more of the future
+hurts, for the same reason WarmAll hurts in H1.
+
+### H4 — zipf sweep, slow storage, 64 MB cache
+
+| zipf | LRU | WarmAll | Leaper (prefetch only) | Leaper warms / WarmAll warms |
+|---|---|---|---|---|
+| 0.0 | 13.97% | 12.17% | 12.51% | |
+| 0.3 | 16.20% | 14.32% | 14.31% | |
+| 0.5 | 23.11% | 20.48% | 20.47% | 57% |
+| 0.9 | 51.37% | 46.62% | 47.04% | |
+| 0.99 | 58.98% | 54.30% | 53.86% | 63% |
+
+Every prefetching policy loses to LRU at every skew, by 1.5-5pp. On a
+stationary zipfian LRU already holds the hot set, and the last column says
+why Leaper does not help it: with 40,000-key ranges over 4M keys there are
+100 ranges, 6,000 reads/s reach nearly all of them every second, so nearly
+every range is labelled hot and Leaper warms 60% of what WarmAll warms — at
+3.9% precision (zipf 0.99: 207,600 warmed, 8,159 read). This is the range
+granularity problem from M1 in its purest form: the ranges Algorithm 1's
+floor produces are far coarser than a zipfian hot set. The paper's Figure
+13(a) shape (gain rising with skew) does not reproduce under corrected
+counting; what rises with skew is LRU.
+
+### H5 — distribution shift and SSAD, slow storage
+
+Workload changes at t = 120 s from 16 chains / 8 s lifetimes to 64 chains /
+3 s; the model was trained on the first shape only. SSAD relative
+threshold 0.3, window 5.
+
+| policy | whole run | before shift | after shift | SSAD suspended |
+|---|---|---|---|---|
+| LRU | 34.59% | 39.73% | 24.37% | — |
+| WarmAll | 31.96% | 37.47% | 20.99% | — |
+| Leaper (prefetch only) | 34.90% | 40.42% | 23.93% | — |
+| Leaper (prefetch only) + SSAD | **35.18%** | 40.45% | **24.66%** | 60 s (all of the post-shift period) |
+
+Two firsts. SSAD *fired* on a real change — the miss ratio, now counted
+correctly, jumped 26% relative — and suspending the prefetcher after the
+shift was worth +0.73pp over leaving it running with a stale model (24.66 vs
+23.93 after the shift), which turns Leaper's post-shift -0.44pp against LRU
+into +0.29pp. The effect is small and close to the noise floor (H9); it is
+the direction the paper claims, at a size the paper does not quantify.
+
+### H6 — range queries, slow storage
+
+10% of reads are 32-record scans.
+
+| policy | hit ratio | vs LRU | misses in windows vs stock | prefetch precision |
+|---|---|---|---|---|
+| LRU | 50.70% | — | — | — |
+| WarmAll | 49.46% | -1.24pp | +3.5% | 0.035 |
+| Leaper (prefetch only) | 51.78% | +1.08pp | -2.0% | 0.154 |
+| Oracle (W=1) | 51.93% | +1.23pp | -1.8% | 0.124 |
+
+Same ordering as H1 with slightly larger margins; scans give the prefetched
+block more chances to be read before it is evicted.
+
+### H7 — SSAD at a 10% threshold
+
+Same shift as H5, relative threshold 0.1: whole run 35.46%, before the shift
+40.74%, after it **24.98%**, suspended for the whole post-shift minute — the
+same suspension as at 0.3, so the same result within noise (+0.32pp on the
+post-shift period, +0.28pp whole-run). On this shift the threshold does not
+matter between 0.1 and 0.3; both fire within the window.
+
+### H8 — run-to-run noise, same seed
+
+Three rows of H1 repeated with an identical binary, seed and protocol:
+
+| policy | run 1 | run 2 | difference |
+|---|---|---|---|
+| LRU | 45.69% | 45.54% | 0.15pp |
+| WarmAll | 43.27% | 43.55% | 0.28pp |
+| Leaper (prefetch only) | 46.56% | 46.52% | 0.04pp |
+
+Compaction counts also repeat (59/58, 36/33, 58/58). **Differences under
+about 0.3pp in the slow-storage tables are not differences.** That covers
+Leaper-vs-EagerEvict in H1 (0.02pp) and H5's Leaper-vs-LRU (0.31pp); it does
+not cover WarmAll's -2.4pp, WarmFlushOnly's +0.47pp over EagerEvict, SSAD's
++0.73pp on the post-shift period, or anything in H2.
+
+### H10 — is it the device or the cache? Cache size on both devices
+
+Same four policies, same models as H1/H2; only the cache size moves. Gains
+are given against EagerEvict, the floor for warming (H8's noise is ~0.3pp).
+
+| device, cache | LRU | EagerEvict | WarmAll vs floor | Leaper (prefetch only) vs floor | Leaper precision | WarmAll precision | comps LRU → WarmAll |
+|---|---|---|---|---|---|---|---|
+| slow, 64 MB (H1) | 45.69% | +0.85pp | **-3.27pp** | +0.02pp | 0.12 | 0.03 | 59 → 36 |
+| slow, 128 MB | 55.91% | +3.62pp | **-3.67pp** | -0.15pp | 0.42 | 0.11 | 60 → 36 |
+| slow, 256 MB | 67.94% | +2.36pp | **+7.03pp** | +2.65pp | 0.70 | 0.32 | 60 → 37 |
+| NVMe, 64 MB | 72.27% | +1.12pp | **-5.81pp** | +0.37pp | 0.44 | 0.05 | 254 → 254 |
+| NVMe, 128 MB (H2) | 83.34% | +0.33pp | -0.19pp | **+2.90pp** | 0.73 | 0.14 | 252 → 252 |
+
+Three regimes, and neither device nor cache size alone separates them:
+
+* **Cache smaller than the working set** (64 MB on either device, 128 MB on
+  slow storage): nothing a prefetcher does helps. Leaper is neutral — its
+  precision rises with the cache (0.12 → 0.44) but the block it warms is
+  still gone before its range is read often enough to matter — and WarmAll
+  loses 3-6 points because every junk block it inserts displaces a block
+  that would have been hit. On NVMe this happens with compaction throughput
+  untouched (254 → 254), so it is pure displacement, not the slowdown seen
+  on slow storage.
+* **Cache about the size of the working set** (NVMe, 128 MB): selection
+  pays, +2.9pp over the floor with 73% precision, while warming everything
+  is neutral. This is the paper's regime and the paper's result.
+* **Cache larger than the working set** (slow, 256 MB): everything pays, and
+  warming everything pays most — +7.0pp against Leaper's +2.65pp — because
+  junk no longer displaces anything and what limits a selective policy is
+  recall, not precision: Leaper warms 40k blocks at 70% precision where
+  WarmAll warms 358k at 32%, and 32% of 358k is 115k useful blocks against
+  Leaper's 28k.
+
+What still separates slow-128 MB (Leaper -0.15pp) from NVMe-128 MB (+2.9pp)
+is not the device's latency: the two runs differ in operation rate (8,000 vs
+40,000 per second) and write rate, so a hot range on NVMe receives five times
+as many reads during its 8 s lifetime, which is five times as many chances
+for a prefetched block to be hit before it is evicted. H14 varies the
+lifetime directly to test that.
+
+### H12 — RocksDB, workload-only counting (m7v3)
+
+NVMe, 128 MB block cache, 40,000 ops/s, 300 s; same lifecycle workload as H2.
+
+| policy | hit ratio | vs stock | p99 us | comps |
+|---|---|---|---|---|
+| stock (`kDisable`) | 81.86% | — | 28 | 337 |
+| `kFlushOnly` | 81.87% | +0.01pp | 31 | 335 |
+| `kFlushAndCompaction` | 81.79% | -0.07pp | 27 | 337 |
+| Leaper (predict at begin, warm at end) | 81.92% | +0.06pp | 30 | 337 |
+| Leaper + 32 MB row cache | 79.32% | -2.54pp | 35 | 336 |
+
+Nothing moves — the same null result as before the counting fix, now with
+the fix ruling out the listener's own warm scans (93k background lookups,
+counted separately) as the cause. RocksDB's background share is only 10% of
+lookups and 80% of those hit, so the sixth defect never mattered much here.
+
+The null is structural, not a verdict on the method. On LevelDB the hook
+warms *every output block* of the compaction that overlaps a predicted-hot
+range — 437k blocks in the H2 run, 73% of them read. The zero-patch RocksDB
+adapter has no block-level access to the compaction's output; it warms by
+seeking a DB iterator to each hot range and scanning the first
+`warm_scan_keys` = 4,096 keys of its 40,000. Over the run that was 660 range
+scans, roughly 80k blocks — a fifth of the LevelDB volume, and only the
+first tenth of each range while the hot keys are spread across it. The row
+cache result is the same story one level up: a 32 MB row cache taken out of
+a 128 MB budget holds fewer bytes than the blocks it displaces.
+
+(Amended after H13, below, which raises the scan to the whole range.)

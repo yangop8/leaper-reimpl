@@ -8,10 +8,13 @@
 #define LEAPER_ADAPTERS_LEVELDB_H_
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -26,6 +29,12 @@ struct AdapterOptions {
   // Key format: "decimal" for the benchmark's 16-byte zero-padded keys,
   // "prefix" for arbitrary byte keys (first 8 bytes, big-endian).
   std::string key_format = "decimal";
+  // Where the cost of a warm read is charged. false: the compaction thread
+  // reads the block itself before moving on (the cost shows up as slower
+  // compaction). true: a dedicated thread does it (the cost shows up nowhere
+  // under an emulated per-read delay, and as device contention on real
+  // hardware). The two bracket what a real deployment would see.
+  bool warm_async = false;
 };
 
 class Adapter : public leveldb::LeaperHooks {
@@ -33,6 +42,9 @@ class Adapter : public leveldb::LeaperHooks {
   static std::unique_ptr<Adapter> Create(const AdapterOptions& opts,
                                          std::string* error);
   ~Adapter() override;
+  // Stops the asynchronous warm thread, discarding queued work. Must be
+  // called before the DB it warms into is closed. Idempotent.
+  void Shutdown();
 
   void Bind(leveldb::LeaperEngineOps* ops) override;
   void OnGet(const leveldb::Slice& user_key) override;
@@ -53,16 +65,18 @@ class Adapter : public leveldb::LeaperHooks {
   // artefacts indexed by trace time (the oracle's per-slot hot sets, and the
   // timestamp features) line up with what the plug-in sees online.
   void ResetClock();
-  uint64_t warmed_blocks() const { return warmed_; }
+  uint64_t warmed_blocks() const { return warmed_.load(); }
   uint64_t warm_failed() const { return warm_failed_.load(); }
   uint64_t evict_failed() const { return evict_failed_.load(); }
-  uint64_t warm_us() const { return warm_us_; }
+  uint64_t warm_us() const { return warm_us_.load(); }
 
  private:
   class CacheBridge;
 
   Adapter() = default;
   uint64_t NowUs() const;
+  void WarmBatch(const std::vector<leaper::BlockRef>& warm);
+  void WarmLoop();
   leaper::RangeId RangeOfInternalKey(const leveldb::Slice& internal_key) const;
   leaper::RangeId MapInternalKey(const leveldb::Slice& internal_key) const;
 
@@ -79,8 +93,16 @@ class Adapter : public leveldb::LeaperHooks {
   // File sizes learned from compaction inputs, so an obsolete file can still
   // be opened to enumerate its blocks.
   std::unordered_map<uint64_t, uint64_t> file_sizes_;
-  uint64_t warmed_ = 0, warm_us_ = 0;
+  std::mutex fs_mu_;  // file_sizes_ is read from the warm thread too
+  std::atomic<uint64_t> warmed_{0}, warm_us_{0};
   std::atomic<uint64_t> warm_failed_{0}, evict_failed_{0};
+
+  bool warm_async_ = false;
+  std::thread warm_thread_;
+  std::mutex wq_mu_;
+  std::condition_variable wq_cv_;
+  std::deque<std::vector<leaper::BlockRef>> warm_queue_;
+  bool wq_stop_ = false;
 };
 
 }  // namespace leaper_leveldb

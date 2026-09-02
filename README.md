@@ -29,17 +29,39 @@ A learned prefetcher's value is decided by what a wasted cache insertion costs,
 and that quantity depends on every row of that table. **Treat the measurements
 here as evidence about this setup, not as a verdict on the paper.**
 
-What can fairly be said:
+A further warning specific to this repository: **two measurement defects
+were found and fixed during the review follow-up (M8), and every hit ratio
+measured before that point is wrong.** Compaction-output warming silently
+failed (only flush outputs were ever warmed), and the harness counted
+LevelDB's own compaction reads as workload lookups — a third of all lookups,
+and a share that the warming policies themselves changed. The headline
+conclusion flipped twice as these were fixed. The corrected measurements are
+section H of [`docs/M8-review-followup.md`](docs/M8-review-followup.md); the
+earlier documents are kept with banners saying what is superseded.
 
-* **Against the paper's own baselines, the reproduction succeeds.** Leaper beats
-  Incremental Warmup by 6.3 percentage points of block cache hit ratio here, in
-  the same direction and of a similar magnitude to what the paper reports.
-* **Against a baseline the paper does not consider — warming every block a
-  compaction writes — it does not**, in any of the regimes tested. That baseline
-  is trivial to implement, and RocksDB now ships it
-  (`prepopulate_block_cache=kFlushAndCompaction`).
-* Whether that reverses on real traces and real hardware is **untested**, and is
-  the first thing anyone continuing this work should do.
+What can fairly be said, on the corrected measurements:
+
+* **The paper's result reproduces in the paper's regime — a cache about the
+  size of the working set.** On NVMe with a 128 MB cache, Leaper's prefetch
+  is +3.2pp of block cache hit ratio over stock LRU and +2.9pp over the floor
+  every warming policy shares (reclaiming dead blocks), with 73% of its
+  prefetched blocks read; warming every block a compaction writes is neutral
+  and adds latency spikes; an oracle shows two more points of headroom.
+* **It does not reproduce outside that band.** With a cache smaller than the
+  working set no prefetcher helps and warming everything costs 3-6 points;
+  with a cache larger than it, warming everything beats selection (+7.0 vs
+  +2.65pp), because recall then matters more than precision. Whether a
+  deployment sits in the band is decided by cache size, operation rate and how
+  long a hot range stays hot, not by the device.
+* **On slow storage the cheapest policy wins:** warm flush outputs only
+  (RocksDB's `kFlushOnly`), +1.3pp for 8k warmed blocks and no model. This is
+  the policy the fifth defect had silently reduced "WarmAll" to, which is why
+  the pre-M8 documents found it so strong.
+* **Run-to-run noise is ~0.3pp** on the slow-storage tables (same seed,
+  same binary); differences under that are reported as none.
+* Whether any of this transfers to real traces and real hardware is
+  **untested**, and remains the first thing anyone continuing this work should
+  do.
 
 ---
 
@@ -71,20 +93,34 @@ unreachable garbage until LRU happens to evict them. Reclaiming them is worth
 baseline here (`EagerEvict`) precisely so that this free win is not credited to
 the learned prefetcher.
 
-**A learned prefetcher's real competitor is "warm everything", not LRU.** Six
-hypotheses for why selection should pay were tested and refuted: cache too rich
-(swept 27% → 1% of data), misses too cheap (emulated 200 us device), hot set too
-dense (100 → 1000 ranges), reads and writes sharing a hot set (correlation
-1.0 → 0.2), prediction horizon too short, and insufficient compaction churn. The
-mechanism that survives all of them: **`WarmAll` is a recency-of-write prior and
-LRU is a recency-of-read prior**, and on an LSM-tree the block a compaction just
-wrote is the better bet — while what it displaces, at LRU's cold end, is the
-one-hit tail. Warming junk evicts junk, so precision buys nothing.
+**A learned prefetcher's real competitors are "warm everything" and "warm
+flush outputs only", not LRU** — and which of the three wins is a property of
+the cache-to-working-set ratio, not of the method. Selection pays in a band
+around "cache ≈ working set" (+2.9pp over the shared floor on NVMe/128 MB);
+below it nothing pays; above it recall beats precision and warming
+everything wins. Every earlier finding in this repository that "WarmAll
+dominates" was measured with compaction-output warming broken and
+compaction reads in the denominator, and does not survive the fix.
+
+**Measure what the workload sees, not what the cache sees.** LevelDB's
+compaction thread looks up every input block in the block cache
+(`fill_cache=false` only stops the insert), and a policy that warms from that
+thread slows compaction and so removes a third of those near-certain misses
+from its own denominator. This bias was worth +2pp to WarmAll and inverted
+the oracle-lookahead result. The harness now counts the workload's threads
+only, on both engines.
+
+**Where the warm read runs is a first-order cost on slow storage.** Warming
+every output block from the compaction thread, at 200 us a block, halves
+compaction throughput (59 → 36 compactions in 180 s). The repository charges
+that cost to the compaction thread by default and, optionally, to a
+separate thread (`--warm_async`); the two bracket a real device.
 
 **The two phases pull in opposite directions on LevelDB.** Prefetch alone is
-+1.98pp; adding the eviction phase makes it -0.72pp. The step-1 model's recall
-is 0.807, so a fifth of the ranges that will be read are predicted cold and
-their blocks are dropped while the input files are still serving reads.
++0.87pp on slow storage; adding the eviction phase makes it +0.59pp. The
+step-1 model's recall is 0.807, so a fifth of the ranges that will be read
+are predicted cold and their blocks are dropped while the input files are
+still serving reads.
 
 ## Layout
 
@@ -152,7 +188,7 @@ regime (`CACHE_MB`, `READ_DELAY_US`, `OP_RATE`, `WRITE_CORR`, `RANGE_SIZE`, ...)
 | M2-M3 | Online collector, inference, two-phase prefetcher on LevelDB | [`docs/M2-M3-leveldb-integration.md`](docs/M2-M3-leveldb-integration.md) |
 | M4 | Baseline matrix, oracle upper bound, regime sweeps | [`docs/M4-results.md`](docs/M4-results.md) |
 | M5-M7 | Core/adapter split and the RocksDB port | [`docs/M5-M7-rocksdb.md`](docs/M5-M7-rocksdb.md) |
-| M8 | Review follow-up: defects fixed, the paper's own metrics, real traces | [`docs/M8-review-followup.md`](docs/M8-review-followup.md) |
+| M8 | Review follow-up: six defects fixed, the paper's own metrics, real traces, and the corrected re-measurement (section H) | [`docs/M8-review-followup.md`](docs/M8-review-followup.md) |
 
 ## Known gaps
 
@@ -166,9 +202,13 @@ regime (`CACHE_MB`, `READ_DELAY_US`, `OP_RATE`, `WRITE_CORR`, `RANGE_SIZE`, ...)
   real Twitter samples). A floor on the range count is added for the synthetic
   case, and there the reported range size is determined by that floor rather
   than by the paper's criterion.
-* **No phase 1 on RocksDB.** Block cache keys derive from a per-file
-  `OffsetableCacheKey` inside the table reader, so eviction is not implementable
-  as a plug-in there.
+* **No phase 1 on RocksDB, and phase 2 is structurally weaker there.** Block
+  cache keys derive from a per-file `OffsetableCacheKey` inside the table
+  reader, so eviction is not implementable as a plug-in, and the zero-patch
+  adapter can only warm by scanning predicted-hot ranges through a DB
+  iterator rather than by touching the compaction's output blocks. Its
+  result on RocksDB is a null within noise; see H12-H13 for what a longer
+  scan does.
 * **Latency results are from an emulated slow device**, not real spinning disks.
 
 ## Licence
