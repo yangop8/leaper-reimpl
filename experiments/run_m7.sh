@@ -23,7 +23,7 @@ TAG=${TAG:-m7}
 STAGE=${STAGE:-all}
 mkdir -p "$OUT"
 
-RANGE=40000
+RANGE=${RANGE_SIZE:-40000}
 SLOT=1.0
 WARMUP=30
 
@@ -32,13 +32,14 @@ WARMUP=30
 # engine comparison only means something on the same shape of tree, so the
 # default here is LevelDB's; LEVEL_BASE_MB=256 reproduces the pre-H15 runs.
 WORKLOAD=(
-  --num=4000000 --value_size=100 --cache_mb=128 --write_buffer_mb=8
-  --max_file_mb=4 --block_kb=4
+  --num=${NUM_KEYS:-4000000} --value_size=${VALUE_SIZE:-100}
+  --cache_mb=${CACHE_MB:-128} --write_buffer_mb=${WRITE_BUFFER_MB:-8}
+  --max_file_mb=${MAX_FILE_MB:-4} --block_kb=4
   --level_base_mb=${LEVEL_BASE_MB:-10} --l0_trigger=${L0_TRIGGER:-4}
-  --key_dist=lifecycle --life_range_size=$RANGE --life_hot_slots=16
-  --life_lifetime_s=8 --life_ramp_frac=0.25 --life_chain=4 --life_chain_lag=0.2
+  --key_dist=lifecycle --life_range_size=$RANGE --life_hot_slots=${HOT_SLOTS:-16}
+  --life_lifetime_s=${LIFETIME_S:-8} --life_ramp_frac=0.25 --life_chain=4 --life_chain_lag=0.2
   --threads=4 --read_ratio=0.75 --update_ratio=0.20
-  --op_rate=40000 --write_rate=4000
+  --op_rate=${OP_RATE:-40000} --write_rate=${WRITE_RATE:-4000}
   --duration="$DUR" --warmup=$WARMUP
 )
 
