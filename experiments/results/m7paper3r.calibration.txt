@@ -1,0 +1,7 @@
+[note] experiments/results/m7paper3_train.events.csv missing; deriving windows from the timeseries
+[T1] 11 compaction windows, median=1.00s max=2.00s (1s resolution)
+[T2] 3 measured recoveries, median=1.00s
+[T2] mean QPS=60300, beta = 2.226e+03
+
+suggested flags: --leaper_t1_alpha=1.3e-05 --leaper_t2_beta=2225.81
+or pin them directly: --leaper_t2_seconds=1.000

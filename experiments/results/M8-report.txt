@@ -425,3 +425,23 @@ Leaper (sst warm)        81.86%    +0.13pp     40160    +0.0%       23       28 
 comps: compactions completed in the measured window (LevelDB) or MB written by compaction
        (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
+
+################ H17 RocksDB at the paper's scale (10 GB data, 3 GB cache): m7paper2 = churning hot set, m7paper3 = stable, m7paper3r = repeat ################
+-- m7paper2
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              67.58%    +0.00pp     60148    +0.0%       15      118    2,981,565   2866    19%
+kFlushOnly               66.99%    -0.59pp     60139    -0.0%       25      138    3,035,806   2759    19%
+kFlushAndCompaction      66.70%    -0.88pp     60146    -0.0%       15      113    3,062,620   2690    18%
+Leaper (sst warm)        67.59%    +0.01pp     60127    -0.0%       18      118    2,980,041   2795    19%
+-- m7paper3
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              90.10%    +0.00pp     60075    +0.0%       12       41      900,019   2642    18%
+kFlushOnly               91.49%    +1.39pp     60246    +0.3%       17       78      775,785   2941    19%
+kFlushAndCompaction      91.40%    +1.30pp     60289    +0.4%       17       85      784,551   2812    19%
+Leaper (sst warm)        91.65%    +1.55pp     60275    +0.3%       17       73      761,770   2942    19%
+-- m7paper3r
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              90.11%    +0.00pp     60294    +0.0%       17       75      903,092   2814    19%
+kFlushOnly               91.48%    +1.38pp     60314    +0.0%       20       93      777,683   2815    19%
+Leaper (sst warm)        91.65%    +1.54pp     60289    -0.0%       20       86      762,200   2815    19%
+

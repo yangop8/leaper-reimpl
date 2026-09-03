@@ -133,3 +133,5 @@ $PY tools/summarize_matrix.py $OUT m7v5 | grep -v missing
 for K in off leaper sst_leaper; do f=$OUT/m7v5_$K.timeseries.csv; [ -f "$f" ] && awk -F, -v k=$K 'NR>1{h+=$6;l+=$5} END{printf "  %-12s background lookups %s (hits %s)\n", k, $27, $28}' "$f"; done
 sec "H16 RocksDB, classic leveling (dynamic_level_bytes=0): m7v6"
 $PY tools/summarize_matrix.py $OUT m7v6 | grep -v missing
+sec "H17 RocksDB at the paper's scale (10 GB data, 3 GB cache): m7paper2 = churning hot set, m7paper3 = stable, m7paper3r = repeat"
+for T in m7paper2 m7paper3 m7paper3r; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T | grep -v missing | sed -n '3,7p'; done

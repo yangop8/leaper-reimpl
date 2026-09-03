@@ -59,6 +59,15 @@ What can fairly be said, on the corrected measurements:
   (RocksDB's `kFlushOnly`), +1.3pp for 8k warmed blocks and no model. This is
   the policy the fifth defect had silently reduced "WarmAll" to, which is why
   the pre-M8 documents found it so strong.
+* **At the paper's scale on RocksDB — 10 GB of data, a 3 GB block cache, a
+  stable hot set — the reproduction succeeds there too, at a tenth of the
+  size.** Every warming policy gains over a point of hit ratio (the first
+  RocksDB configuration in which any does), Leaper is the best of them at
+  +1.55pp over stock, and its margin over warming flush outputs alone is
+  +0.16pp against a 0.01pp noise floor. Getting there took three attempts,
+  and the two failures are findings: at the paper's *write rate* RocksDB ran
+  zero compactions in 200 s, and with a hot set that turns over every 8 s no
+  policy helps at all.
 * **Run-to-run noise is ~0.3pp** on the slow-storage tables (same seed,
   same binary); differences under that are reported as none.
 * Whether any of this transfers to real traces and real hardware is
@@ -126,7 +135,8 @@ whole-key-space writes moves one 4 MB file at a time into the 40 MB of L2 it
 overlaps); RocksDB ran ~50 and rewrote 0.45-0.67 GB (~3-5), with or without
 dynamic level sizing. A prefetcher can only recover what compaction
 destroys, so the same model with the same block-level warming is +2.9pp on
-LevelDB and +0.14pp on RocksDB. Two earlier explanations for the RocksDB
+LevelDB and +0.14pp on RocksDB at 480 MB — and +1.55pp on RocksDB once the
+database is 10 GB and the writes are heavy enough to make it compact. Two earlier explanations for the RocksDB
 null — the iterator-based warming, and a race between concurrent jobs in the
 adapter — were real defects and were fixed, and neither was the cause.
 

@@ -894,3 +894,87 @@ verified on both; what a RocksDB result *with* a margin needs is a
 configuration that compacts as much as LevelDB does — a database much
 larger than its level targets, heavier writes, or universal compaction —
 which is the next experiment, not a fix.
+
+### H17 — RocksDB at the paper's scale
+
+H15/H16 ran RocksDB on a 480 MB database, which is not what the paper
+measures. Section 7.3 of the paper uses 10 GB of data, 200-byte records and
+a 4 GB buffer cache of which 3 GB is block cache — a 30% cache-to-data
+ratio — and reports "about 10 background operations" in a 200 s test. Neither
+that paper nor the X-Engine paper gives compaction bytes or a write
+amplification figure (X-Engine reports only that reusing 2 MB extents cuts
+write amplification 63% against RocksDB, and concedes that compactions still
+hurt hit rates on a regular basis), so the quantity to match is the shape of
+the setup, not a number.
+
+`experiments/run_m7_paperscale.sh` puts RocksDB there: 50M records of 200 B
+(10 GB), a 3 GB block cache, 200 s measured. Getting into the paper's regime
+took three corrections, and each failure is informative.
+
+**First attempt: no compaction at all.** At the paper's write rate (4,000
+writes/s = 141 MB in 200 s) against a 64 MB write buffer and an L0 trigger
+of 4, RocksDB needs 256 MB of writes before its first L0→L1 compaction. It
+performed **zero compactions in 200 s** — 168 MB of flushes and nothing
+else. On a 10 GB database RocksDB simply does not move data at that write
+rate, which is the H15 write-amplification finding in its starkest form.
+Fix: a 16 MB write buffer and 15,000 writes/s, giving ~2.7 GB of compaction
+writes per 200 s.
+
+**Second attempt: the working set did not fit.** With compaction volume
+fixed, stock hit ratio was 67.6% — the H10 regime where nothing pays, and
+the matrix says exactly that:
+
+| policy | hit ratio | vs stock |
+|---|---|---|
+| stock | 67.58% | — |
+| `kFlushOnly` | 66.99% | -0.59pp |
+| `kFlushAndCompaction` | 66.70% | -0.88pp |
+| Leaper (block-level `sst` warming) | 67.59% | +0.01pp |
+
+The cause was not cache size but hot-set churn: with 8 s lifetimes a new
+generation of 64 ranges becomes hot every 8 s, so a large share of reads are
+first touches that no prefetcher can anticipate. The paper's workloads have
+a stable hot set — it reports a 99% hit ratio in the absence of background
+operations.
+
+**Third attempt: the paper's regime.** Same 10 GB, same 3 GB cache, same
+2.7 GB of compaction per 200 s, hot ranges living 60 s instead of 8. Stock
+hit ratio 90.1%, model precision 0.999 and recall 0.96 over 507 ranges:
+
+| policy | hit ratio | vs stock | p99 us | blocks warmed |
+|---|---|---|---|---|
+| stock | 90.10% | — | 41 | — |
+| `kFlushOnly` | 91.49% | +1.39pp | 78 | |
+| `kFlushAndCompaction` | 91.40% | +1.30pp | 85 | |
+| Leaper, block-level `sst` warming | **91.65%** | **+1.55pp** | 73 | 271,440 from 471 files |
+
+**Warming pays here, and this is the first RocksDB configuration in which it
+does.** Every policy that warms gains over a point; Leaper is the best of
+them and has the lowest tail of the three, but its margin over warming
+flush outputs alone is 0.16pp. Repeating all three runs with the same seed
+puts that margin well outside the noise — this configuration is the most
+repeatable in the repository:
+
+| policy | run 1 | run 2 | difference |
+|---|---|---|---|
+| stock | 90.10% | 90.11% | 0.01pp |
+| `kFlushOnly` | 91.49% | 91.48% | 0.01pp |
+| Leaper | 91.65% | 91.65% | 0.00pp |
+
+(Tail latency is not repeatable at that resolution: stock's mean p99 was
+41 us in one run and 75 us in the other, so the p99 column above ranks
+policies within a run and should not be compared across runs.)
+
+So on RocksDB, at the paper's scale and in the paper's regime, **selection
+beats both warming nothing (+1.55pp) and the best naive warming
+(+0.16pp)**, and the second margin is sixteen times the noise floor but a
+tenth of the first.
+
+What this says about the reproduction: the paper's regime is reachable on
+RocksDB, and in it the paper's qualitative claim holds — prefetching what
+compaction invalidates recovers cache misses that LRU cannot. What does not
+reproduce is the *size* of the advantage a learned prefetcher has over the
+naive alternatives, which on RocksDB stays a fraction of a point in every
+configuration tried, against 2.9pp on LevelDB in the equivalent regime. The
+two engines differ in how much they invalidate, and that difference decides
+how much there is to win.
