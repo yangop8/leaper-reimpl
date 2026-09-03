@@ -978,3 +978,104 @@ naive alternatives, which on RocksDB stays a fraction of a point in every
 configuration tried, against 2.9pp on LevelDB in the equivalent regime. The
 two engines differ in how much they invalidate, and that difference decides
 how much there is to win.
+
+## The eighth defect — the RocksDB warm paths had no budget
+
+The core enforces a prefetch budget in `ShouldPrefetch`, by adding up
+`BlockRef::size` and refusing once a run of warms exceeds
+`max_prefetch_frac x cache_bytes`. The RocksDB adapter's candidates are whole
+key ranges with `size = 0`, because RocksDB gives a plug-in no block layout to
+predict over, so that check never fired: the budget was a no-op on RocksDB
+from the start. It did not matter while the workloads had ~100 coarse ranges
+and a job warmed two of them. At 25,000 ranges it matters enormously — one
+200 s run below spent **3,350 seconds of background time** warming, scanning
+18.2M ranges through DB iterators.
+
+Fixed in the adapter, where the warming actually happens: both warm paths now
+count the data blocks they really pull in, using the thread-local
+`PerfContext` the harness already enables, and stop once a job has warmed
+`max_prefetch_frac x cache_bytes` worth. Verified on a smoke run: the
+iterator mode now warms 939 of 4,510 predicted-hot ranges and stops; the
+`sst` mode is unaffected in practice because the output files bound it
+already.
+
+## H18 — the paper's two real workloads, in stationary form
+
+H17 got RocksDB to the paper's scale but kept this repository's lifecycle
+workload, whose hot ranges are born and die. The paper's two real workloads
+are stationary power laws over a fixed table (Table 2: e-commerce is zipf 0.3
+with a 6:1 read/write ratio over 10m rows, instant messaging zipf 0.9 with
+2:3 over 8m rows). Four configurations, all on RocksDB with block-level
+`sst` warming, 200 s measured, 60,000 ops/s.
+
+Two of them use a 10 GB table against the 3 GB cache, matching Section 7.3's
+stated data size; two use the tables' own sizes from Table 2, where the whole
+table fits in the cache.
+
+| | table | cache : data | read/write | compaction in 200 s | stock hit ratio |
+|---|---|---|---|---|---|
+| A | 50m rows, 10 GB | 0.3 | 40/60 | 5.8 GB | 54.64% |
+| B | 50m rows, 10 GB | 0.3 | 85/15 | 1.2 GB | 34.48% |
+| C | 8m rows, 1.5 GB | 2.0 | 40/60 | 6.9 GB | 70.09% |
+| D | 10m rows, 1.8 GB | 1.7 | 85/15 | 1.9 GB | 95.40% |
+
+Results, as points of block cache hit ratio over stock:
+
+| policy | A | B | C | D |
+|---|---|---|---|---|
+| `kFlushOnly` | +1.82 | +0.10 | +8.30 | +0.93 |
+| `kFlushAndCompaction` | +6.47 | +0.34 | **+19.23** | **+4.23** |
+| Leaper, block-level | **+8.71** | +0.25 | +15.48 | +4.23 |
+
+And the model that produced them, on each workload:
+
+| | ranges | positive rate | LightGBM precision / recall | AUC |
+|---|---|---|---|---|
+| A | 25,000 | 0.279 | 0.748 / 0.336 | 0.737 |
+| B | 25,000 | 0.843 | 0.843 / 1.000 | 0.592 |
+| C | 4,000 | 0.765 | 0.765 / 1.000 | 0.738 |
+| D | 5,000 | **1.000** | 1.000 / 1.000 | 0.656 |
+
+**The two tables explain each other.** Selection can only pay where the
+prediction target carries information, and on a stationary power law it
+usually does not: at 24,000-51,000 reads per second, almost every key range
+is touched in any given second, so "will this range be read in the next
+interval" is true nearly everywhere. In D it is true *everywhere* — the
+positive rate is exactly 1.000, the model predicts every range hot, and
+Leaper's hit ratio is identical to warming everything to four decimal places
+(99.62% both). In B the rate is 0.843 and the model is barely above chance
+(AUC 0.592). Only in A, where a 10 GB table is read at 24,000/s through
+2,000-key ranges, do 72% of ranges go untouched in a second — and there
+Leaper beats warming everything by 2.24pp, the largest margin it achieves
+anywhere on RocksDB.
+
+C is the opposite corner and the H10 regime map's prediction, confirmed at
+the paper's own workload size: the table fits in the cache, compaction churns
+6.9 GB through it, and recall beats precision, so warming everything wins by
+3.75pp. Leaper is not useless there — it is +15.48pp over stock, and its p99
+is the lowest of the four policies (31 us against stock's 57 and
+`kFlushAndCompaction`'s 106), because it does a fifth of the warming I/O.
+Whoever runs this configuration is choosing between hit ratio and tail
+latency, not between a good policy and a bad one.
+
+**A caveat that applies to every RocksDB number in this document.**
+`kFlushAndCompaction` inserts each block into the cache as the table builder
+produces it, from memory, at no I/O cost. The plug-in has to re-read the
+finished file. So the comparison is not selection versus no selection; it is
+selection-plus-a-re-read versus no-selection-and-no-read. A faithful
+implementation of the paper's design would put the selection *inside*
+`prepopulate_block_cache`, warming from memory only the blocks whose range is
+predicted hot, and would have Leaper's precision at RocksDB's cost. That
+needs a patch to `BlockBasedTableBuilder`, and it is the single most
+worthwhile piece of work left in this repository.
+
+**What this says about the paper's workloads.** The paper reports its models
+at precision and recall around 0.95 on the real Tmall and DingTalk traces, so
+on that data the label is clearly informative — many ranges really are cold
+in a given interval. Our synthetic power laws cannot reproduce that at these
+read rates, which is a limitation of the generator, not evidence against the
+paper. What the four configurations do establish is the *shape* of the
+answer: the learned part of Leaper earns its keep exactly where a large
+fraction of key ranges are cold at any moment and the cache cannot hold
+everything, and it degenerates gracefully to "warm everything" where that is
+not true.

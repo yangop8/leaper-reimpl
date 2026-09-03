@@ -36,9 +36,10 @@ WORKLOAD=(
   --cache_mb=${CACHE_MB:-128} --write_buffer_mb=${WRITE_BUFFER_MB:-8}
   --max_file_mb=${MAX_FILE_MB:-4} --block_kb=4
   --level_base_mb=${LEVEL_BASE_MB:-10} --l0_trigger=${L0_TRIGGER:-4}
-  --key_dist=lifecycle --life_range_size=$RANGE --life_hot_slots=${HOT_SLOTS:-16}
+  --key_dist=${KEY_DIST:-lifecycle} --zipf=${ZIPF:-0.99}
+  --life_range_size=$RANGE --life_hot_slots=${HOT_SLOTS:-16}
   --life_lifetime_s=${LIFETIME_S:-8} --life_ramp_frac=0.25 --life_chain=4 --life_chain_lag=0.2
-  --threads=4 --read_ratio=0.75 --update_ratio=0.20
+  --threads=4 --read_ratio=${READ_RATIO:-0.75} --update_ratio=${UPDATE_RATIO:-0.20}
   --op_rate=${OP_RATE:-40000} --write_rate=${WRITE_RATE:-4000}
   --duration="$DUR" --warmup=$WARMUP
 )

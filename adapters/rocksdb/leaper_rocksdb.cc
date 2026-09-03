@@ -39,13 +39,29 @@ class Adapter::CacheBridge : public leaper::CacheOps {
  public:
   explicit CacheBridge(Adapter* a) : a_(a) {}
 
+  // Data blocks this thread has read from disk, from the thread-local
+  // PerfContext the harness already enables.
+  static uint64_t DataBlocksRead() {
+    const rocksdb::PerfContext* pc = rocksdb::get_perf_context();
+    return pc->block_read_count - pc->index_block_read_count -
+           pc->filter_block_read_count - pc->compression_dict_block_read_count;
+  }
+
   void Evict(const leaper::BlockRef&) override {}
 
   bool IsCached(const leaper::BlockRef&) override { return false; }
 
   void Prefetch(const leaper::BlockRef& b) override {
     if (a_->db_ == nullptr) return;
+    // The core's byte budget cannot see this warm: the candidates the RocksDB
+    // adapter builds are whole key ranges with size 0, so ShouldPrefetch's
+    // budget check never fires. Count the blocks this scan actually pulls in
+    // and stop the job's warming once it has read a cache's worth. Without
+    // this the iterator mode is unbounded: on a 25,000-range workload one run
+    // spent 3,350 seconds of background time warming during a 200 s test.
+    if (a_->WarmBudgetExhausted()) return;
     const uint64_t t0 = MonotonicUs();
+    const uint64_t blocks0 = DataBlocksRead();
     rocksdb::ReadOptions ro;
     ro.fill_cache = true;
     ro.verify_checksums = false;
@@ -60,8 +76,11 @@ class Adapter::CacheBridge : public leaper::CacheOps {
          it->Next()) {
       ++n;
     }
+    const uint64_t read = DataBlocksRead() - blocks0;
     std::lock_guard<std::mutex> lock(a_->mu_);
     a_->warm_us_ += MonotonicUs() - t0;
+    a_->warm_blocks_this_job_ += read;
+    a_->warmed_blocks_ += read;
     ++a_->warmed_;
   }
 
@@ -139,6 +158,7 @@ void Adapter::Listener::Begin(int job_id, int level, bool is_flush, uint64_t,
     if (a_->core_->ShouldPrefetch(b, a_->NowUs())) chosen.push_back(b);
   }
   a_->pending_by_job_[job_id] = std::move(chosen);
+  a_->warm_blocks_this_job_ = 0;
 }
 
 void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs) {
@@ -161,6 +181,14 @@ void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs)
   a_->core_->OnCompactionEnd(info, a_->NowUs());
 }
 
+// A job may warm at most |max_prefetch_frac| of the block cache. The counter
+// is reset at each job's Begin.
+bool Adapter::WarmBudgetExhausted() {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (warm_block_budget_ == 0) return false;
+  return warm_blocks_this_job_ >= warm_block_budget_;
+}
+
 void Adapter::SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
                               const rocksdb::Comparator* comparator) {
   table_factory_ = std::move(factory);
@@ -175,6 +203,7 @@ void Adapter::SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
 void Adapter::WarmFromFiles(const std::vector<std::string>& outputs,
                             const std::vector<leaper::BlockRef>& ranges) {
   if (ranges.empty() || outputs.empty()) return;
+  if (WarmBudgetExhausted()) return;
   const uint64_t t0 = MonotonicUs();
   rocksdb::Options o;
   o.table_factory = table_factory_;
@@ -209,6 +238,7 @@ void Adapter::WarmFromFiles(const std::vector<std::string>& outputs,
   std::lock_guard<std::mutex> lock(mu_);
   warm_us_ += MonotonicUs() - t0;
   warmed_ += ranges.size();
+  warm_blocks_this_job_ += blocks;
   warmed_blocks_ += blocks;
   warm_files_ += files;
   warm_open_failed_ += failed;
@@ -222,6 +252,8 @@ std::unique_ptr<Adapter> Adapter::Create(const AdapterOptions& opts,
   a->start_us_ = MonotonicUs();
   a->warm_scan_keys_ = opts.warm_scan_keys;
   a->warm_mode_ = opts.warm_mode;
+  a->warm_block_budget_ = static_cast<uint64_t>(
+      opts.core.max_prefetch_frac * opts.core.cache_bytes / opts.warm_block_bytes);
   a->range_size_ = opts.core.range_size ? opts.core.range_size : 1;
   a->mapper_ = (opts.key_format == "prefix")
                    ? leaper::NewPrefixRangeMapper(opts.core.range_size)

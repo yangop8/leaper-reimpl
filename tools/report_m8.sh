@@ -135,3 +135,5 @@ sec "H16 RocksDB, classic leveling (dynamic_level_bytes=0): m7v6"
 $PY tools/summarize_matrix.py $OUT m7v6 | grep -v missing
 sec "H17 RocksDB at the paper's scale (10 GB data, 3 GB cache): m7paper2 = churning hot set, m7paper3 = stable, m7paper3r = repeat"
 for T in m7paper2 m7paper3 m7paper3r; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T | grep -v missing | sed -n '3,7p'; done
+sec "H18 the paper's two real workloads, stationary (A/B = 10 GB table, C/D = the tables' own sizes)"
+for T in m7zipf09 m7zipf03 m7fit_im m7fit_ec; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T | grep -v missing | sed -n '3,9p'; done

@@ -65,6 +65,9 @@ struct AdapterOptions {
   //               that fall inside a hot range. Block-level, output-only --
   //               the same thing the LevelDB hook does, without a patch.
   std::string warm_mode = "iterator";
+  // Block size, used only to turn the core's byte budget into a block budget
+  // for the warm paths (the RocksDB adapter's candidates carry no size).
+  uint64_t warm_block_bytes = 4096;
   // Number of key ranges the database spans; the plug-in predicts over these.
   uint64_t num_ranges = 1024;
 };
@@ -118,8 +121,10 @@ class Adapter {
   std::shared_ptr<rocksdb::TableFactory> table_factory_;
   const rocksdb::Comparator* comparator_ = nullptr;
   uint64_t warmed_blocks_ = 0, warm_files_ = 0, warm_open_failed_ = 0;
+  uint64_t warm_blocks_this_job_ = 0, warm_block_budget_ = 0;
   void WarmFromFiles(const std::vector<std::string>& outputs,
                      const std::vector<leaper::BlockRef>& ranges);
+  bool WarmBudgetExhausted();
   uint64_t range_size_ = 1;
   uint64_t num_ranges_ = 1024;
 

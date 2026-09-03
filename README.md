@@ -70,6 +70,16 @@ What can fairly be said, on the corrected measurements:
   policy helps at all.
 * **Run-to-run noise is ~0.3pp** on the slow-storage tables (same seed,
   same binary); differences under that are reported as none.
+* **On the paper's own two workload shapes, the answer depends on which one.**
+  Reproduced as stationary power laws at the paper's scale, the
+  instant-messaging shape (zipf 0.9, write-heavy) is where selection wins by
+  the largest margin seen on RocksDB, +2.2pp over warming everything, when
+  the table is larger than the cache; at the table's own 8m-row size, where
+  it fits in the cache, warming everything wins by 3.8pp instead while
+  Leaper keeps the lowest tail latency. The e-commerce shape (zipf 0.3,
+  read-heavy) leaves nothing to select: every key range is read every
+  second, the model predicts all of them hot, and Leaper's hit ratio equals
+  warming everything to four decimals. See H18.
 * Whether any of this transfers to real traces and real hardware is
   **untested**, and remains the first thing anyone continuing this work should
   do.
@@ -231,6 +241,13 @@ regime (`CACHE_MB`, `READ_DELAY_US`, `OP_RATE`, `WRITE_CORR`, `RANGE_SIZE`, ...)
   real Twitter samples). A floor on the range count is added for the synthetic
   case, and there the reported range size is determined by that floor rather
   than by the paper's criterion.
+* **The RocksDB port re-reads what it warms.** RocksDB's own
+  `kFlushAndCompaction` inserts each block into the cache from memory as the
+  table builder produces it; a plug-in has to reopen the finished file. Every
+  RocksDB comparison here is therefore selection-plus-a-re-read against
+  no-selection-and-no-read. Putting the selection inside
+  `prepopulate_block_cache` needs a patch to `BlockBasedTableBuilder` and is
+  the most worthwhile work left.
 * **No phase 1 on RocksDB.** Block cache keys derive from a per-file
   `OffsetableCacheKey` inside the table reader, so eviction is not
   implementable as a plug-in. Phase 2 *is*: `--warm_mode=sst` opens the
