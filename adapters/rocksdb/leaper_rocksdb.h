@@ -30,11 +30,17 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "leaper/leaper.h"
 #include "rocksdb/db.h"
 #include "rocksdb/listener.h"
+
+namespace rocksdb {
+class Comparator;
+class TableFactory;
+}  // namespace rocksdb
 
 namespace leaper_rocksdb {
 
@@ -46,6 +52,19 @@ struct AdapterOptions {
   // default covers a whole range of 40k keys only partially on purpose: the
   // cost of warming has to stay bounded or the "prefetch" becomes a full scan.
   int warm_scan_keys = 4096;
+  // How a predicted-hot range is warmed once the background job's output
+  // files exist.
+  //   "iterator": seek a DB iterator to the range and scan warm_scan_keys
+  //               keys. Reads the current version of every key in the range
+  //               through every level, so most of what it pulls in is older
+  //               blocks that were not touched by the job.
+  //   "sst":      open each output file of the job with an SstFileReader that
+  //               shares the DB's table factory (hence its block cache; the
+  //               cache key is derived from the file's own properties, see
+  //               sst_warm_check.cc) and read only the blocks of that file
+  //               that fall inside a hot range. Block-level, output-only --
+  //               the same thing the LevelDB hook does, without a patch.
+  std::string warm_mode = "iterator";
   // Number of key ranges the database spans; the plug-in predicts over these.
   uint64_t num_ranges = 1024;
 };
@@ -58,6 +77,13 @@ class Adapter {
 
   // Install before opening the DB, then hand the DB back.
   std::shared_ptr<rocksdb::EventListener> listener();
+  // Required for warm_mode "sst": the DB's own table factory (so the reader
+  // shares its block cache) and comparator.
+  void SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
+                       const rocksdb::Comparator* comparator);
+  uint64_t warmed_blocks() const { return warmed_blocks_; }
+  uint64_t warm_files() const { return warm_files_; }
+  uint64_t warm_open_failed() const { return warm_open_failed_; }
   void SetDB(rocksdb::DB* db);
   void ResetClock();
 
@@ -88,12 +114,22 @@ class Adapter {
   rocksdb::DB* db_ = nullptr;
   uint64_t start_us_ = 0;
   int warm_scan_keys_ = 4096;
+  std::string warm_mode_ = "iterator";
+  std::shared_ptr<rocksdb::TableFactory> table_factory_;
+  const rocksdb::Comparator* comparator_ = nullptr;
+  uint64_t warmed_blocks_ = 0, warm_files_ = 0, warm_open_failed_ = 0;
+  void WarmFromFiles(const std::vector<std::string>& outputs,
+                     const std::vector<leaper::BlockRef>& ranges);
   uint64_t range_size_ = 1;
   uint64_t num_ranges_ = 1024;
 
   mutable std::mutex mu_;
   uint64_t warmed_ = 0, warm_us_ = 0;
-  std::vector<leaper::BlockRef> pending_;  // decided at Begin, warmed at End
+  // Decided at a job's Begin, warmed at its End. Keyed by job id because
+  // RocksDB runs flushes and compactions on different background threads at
+  // the same time (max_background_jobs > 1); a single pending list was taken
+  // by whichever job ended first, and most jobs then warmed nothing.
+  std::unordered_map<int, std::vector<leaper::BlockRef>> pending_by_job_;
 };
 
 }  // namespace leaper_rocksdb

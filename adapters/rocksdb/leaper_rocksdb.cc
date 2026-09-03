@@ -2,6 +2,12 @@
 
 #include "leaper_rocksdb.h"
 
+#include "rocksdb/comparator.h"
+#include "rocksdb/perf_context.h"
+#include "rocksdb/perf_level.h"
+#include "rocksdb/sst_file_reader.h"
+#include "rocksdb/table.h"
+
 #include <algorithm>
 #include <chrono>
 
@@ -70,10 +76,10 @@ class Adapter::Listener : public rocksdb::EventListener {
   explicit Listener(Adapter* a) : a_(a) {}
 
   void OnFlushBegin(rocksdb::DB*, const rocksdb::FlushJobInfo& info) override {
-    Begin(/*level=*/0, /*is_flush=*/true, info.smallest_seqno, 0);
+    Begin(info.job_id, /*level=*/0, /*is_flush=*/true, info.smallest_seqno, 0);
   }
-  void OnFlushCompleted(rocksdb::DB*, const rocksdb::FlushJobInfo&) override {
-    End();
+  void OnFlushCompleted(rocksdb::DB*, const rocksdb::FlushJobInfo& info) override {
+    End(info.job_id, {info.file_path});
   }
   void OnCompactionBegin(rocksdb::DB* db,
                          const rocksdb::CompactionJobInfo& info) override {
@@ -82,22 +88,25 @@ class Adapter::Listener : public rocksdb::EventListener {
     // without reading the inputs.
     uint64_t bytes = 0;
     for (const auto& kv : info.table_properties) bytes += kv.second->data_size;
-    Begin(info.base_input_level, /*is_flush=*/false, 0, bytes / 4096);
+    Begin(info.job_id, info.base_input_level, /*is_flush=*/false, 0, bytes / 4096);
     (void)db;
   }
   void OnCompactionCompleted(rocksdb::DB*,
-                             const rocksdb::CompactionJobInfo&) override {
-    End();
+                             const rocksdb::CompactionJobInfo& info) override {
+    End(info.job_id, info.output_files);
   }
 
  private:
-  void Begin(int level, bool is_flush, uint64_t, uint64_t est_blocks);
-  void End();
+  void Begin(int job_id, int level, bool is_flush, uint64_t, uint64_t est_blocks);
+  void End(int job_id, const std::vector<std::string>& outputs);
   Adapter* a_;
 };
 
-void Adapter::Listener::Begin(int level, bool is_flush, uint64_t,
+void Adapter::Listener::Begin(int job_id, int level, bool is_flush, uint64_t,
                               uint64_t est_blocks) {
+  // The core keeps one job's prediction at a time (hot_t2_), so predicting
+  // and choosing for this job must not interleave with another job's Begin.
+  std::lock_guard<std::mutex> lock(a_->mu_);
   // Candidates are every range the database currently spans. RocksDB does not
   // hand a plug-in the block layout of the inputs, so the prediction is made
   // over the whole range space rather than only over the blocks being
@@ -129,20 +138,80 @@ void Adapter::Listener::Begin(int level, bool is_flush, uint64_t,
   for (const leaper::BlockRef& b : candidates) {
     if (a_->core_->ShouldPrefetch(b, a_->NowUs())) chosen.push_back(b);
   }
-  std::lock_guard<std::mutex> lock(a_->mu_);
-  a_->pending_ = std::move(chosen);
+  a_->pending_by_job_[job_id] = std::move(chosen);
 }
 
-void Adapter::Listener::End() {
+void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs) {
   std::vector<leaper::BlockRef> chosen;
   {
     std::lock_guard<std::mutex> lock(a_->mu_);
-    chosen.swap(a_->pending_);
+    auto it = a_->pending_by_job_.find(job_id);
+    if (it != a_->pending_by_job_.end()) {
+      chosen = std::move(it->second);
+      a_->pending_by_job_.erase(it);
+    }
   }
   // The new files are installed and readable; warming now lands on them.
-  for (const leaper::BlockRef& b : chosen) a_->bridge_->Prefetch(b);
+  if (a_->warm_mode_ == "sst" && a_->table_factory_ != nullptr) {
+    a_->WarmFromFiles(outputs, chosen);
+  } else {
+    for (const leaper::BlockRef& b : chosen) a_->bridge_->Prefetch(b);
+  }
   leaper::CompactionInfo info;
   a_->core_->OnCompactionEnd(info, a_->NowUs());
+}
+
+void Adapter::SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
+                              const rocksdb::Comparator* comparator) {
+  table_factory_ = std::move(factory);
+  comparator_ = comparator;
+}
+
+// Block-level warming of exactly the job's output: open each output file
+// with a reader that shares the DB's block cache and pull in the data blocks
+// that lie inside a predicted-hot range. Runs on the background thread that
+// finished the job, so its reads are not the workload's (the harness counts
+// them under bg_lookups) and its cost is charged where the LevelDB hook's is.
+void Adapter::WarmFromFiles(const std::vector<std::string>& outputs,
+                            const std::vector<leaper::BlockRef>& ranges) {
+  if (ranges.empty() || outputs.empty()) return;
+  const uint64_t t0 = MonotonicUs();
+  rocksdb::Options o;
+  o.table_factory = table_factory_;
+  o.comparator = comparator_ != nullptr ? comparator_ : rocksdb::BytewiseComparator();
+  rocksdb::SetPerfLevel(rocksdb::PerfLevel::kEnableCount);
+  rocksdb::get_perf_context()->Reset();
+  uint64_t blocks = 0, files = 0, failed = 0;
+  for (const std::string& path : outputs) {
+    rocksdb::SstFileReader reader(o);
+    if (!reader.Open(path).ok()) {
+      ++failed;
+      continue;
+    }
+    ++files;
+    rocksdb::ReadOptions ro;
+    ro.fill_cache = true;
+    ro.verify_checksums = false;
+    std::unique_ptr<rocksdb::Iterator> it(reader.NewIterator(ro));
+    for (const leaper::BlockRef& b : ranges) {
+      const std::string start = mapper_->RangeStartKey(b.first_range);
+      const std::string limit = mapper_->RangeStartKey(b.last_range + 1);
+      for (it->Seek(rocksdb::Slice(start));
+           it->Valid() && o.comparator->Compare(it->key(), rocksdb::Slice(limit)) < 0;
+           it->Next()) {
+        // Reading is the point: each new block the iterator enters is one
+        // fill_cache insert under the key the DB's reader will use.
+      }
+    }
+  }
+  const rocksdb::PerfContext* pc = rocksdb::get_perf_context();
+  blocks = pc->block_read_count - pc->index_block_read_count - pc->filter_block_read_count;
+  std::lock_guard<std::mutex> lock(mu_);
+  warm_us_ += MonotonicUs() - t0;
+  warmed_ += ranges.size();
+  warmed_blocks_ += blocks;
+  warm_files_ += files;
+  warm_open_failed_ += failed;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +221,7 @@ std::unique_ptr<Adapter> Adapter::Create(const AdapterOptions& opts,
   std::unique_ptr<Adapter> a(new Adapter());
   a->start_us_ = MonotonicUs();
   a->warm_scan_keys_ = opts.warm_scan_keys;
+  a->warm_mode_ = opts.warm_mode;
   a->range_size_ = opts.core.range_size ? opts.core.range_size : 1;
   a->mapper_ = (opts.key_format == "prefix")
                    ? leaper::NewPrefixRangeMapper(opts.core.range_size)

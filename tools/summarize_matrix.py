@@ -6,7 +6,7 @@ import os
 import sys
 
 POLICIES = ["off", "eager_evict", "incremental_warmup", "warm_all", "warm_flush",
-            "flush_only", "flush_and_compaction", "leaper", "leaper_p2only",
+            "flush_only", "flush_and_compaction", "leaper", "sst_leaper", "leaper_p2only",
             "leaper_p2only_ssad", "leaper_rowcache", "oracle"]
 LABEL = {"off": "LRU (stock)", "eager_evict": "EagerEvict",
          "incremental_warmup": "IncrementalWarmup", "warm_all": "WarmAll",
@@ -14,7 +14,8 @@ LABEL = {"off": "LRU (stock)", "eager_evict": "EagerEvict",
          "leaper": "Leaper (both phases)",
          "leaper_p2only": "Leaper (prefetch only)", "oracle": "Oracle",
          "leaper_p2only_ssad": "Leaper (prefetch, SSAD)", "leaper_rowcache": "Leaper + row cache",
-         "flush_only": "kFlushOnly", "flush_and_compaction": "kFlushAndCompaction"}
+         "flush_only": "kFlushOnly", "flush_and_compaction": "kFlushAndCompaction",
+         "sst_leaper": "Leaper (sst warm)"}
 
 
 def load(prefix):
@@ -64,7 +65,8 @@ def main():
               f"{r['misses']:12,.0f} {r['compactions']:6.0f} "
               + (f"{100 * r['bg_share']:5.0f}%" if r["bg_share"] is not None else "     -"))
     print()
-    print("comps: compactions completed in the measured window; bg lk: share of all block cache")
+    print("comps: compactions completed in the measured window (LevelDB) or MB written by compaction")
+    print("       (RocksDB, whose harness records bytes); bg lk: share of all block cache")
     print("lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)")
 
 

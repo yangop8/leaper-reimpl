@@ -85,6 +85,18 @@ struct Flags {
   double leaper_t2_beta = 3709.0;
   double leaper_threshold = 0.5;
   int warm_scan_keys = 4096;
+  std::string warm_mode = "iterator";   // or "sst": block-level warming of the job's output files
+  // LSM geometry. RocksDB's defaults (L1 = 256 MB, x10 per level) give a
+  // 480 MB database five compactions in five minutes; LevelDB's hard-coded
+  // L1 = 10 MB gives the same database ~250. Set level_base_mb=10 to compare
+  // the two engines on the same shape of tree.
+  int level_base_mb = 256;
+  int l0_trigger = 4;
+  // RocksDB >= 8.4 sizes levels dynamically from the last level up, which
+  // leaves the intermediate levels nearly empty and cuts compaction volume
+  // by an order of magnitude against classic leveling (672 MB vs 9.5 GB in
+  // 300 s on this workload, RocksDB vs LevelDB). 0 = classic leveling.
+  int dynamic_level_bytes = 1;
 };
 
 Flags flags;
@@ -167,6 +179,10 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "leaper_t2_beta", &v)) flags.leaper_t2_beta = ParseDouble("leaper_t2_beta", v);
     else if (ParseFlag(a, "leaper_threshold", &v)) flags.leaper_threshold = ParseDouble("leaper_threshold", v);
     else if (ParseFlag(a, "warm_scan_keys", &v)) flags.warm_scan_keys = ParseInt("warm_scan_keys", v);
+    else if (ParseFlag(a, "warm_mode", &v)) flags.warm_mode = v;
+    else if (ParseFlag(a, "level_base_mb", &v)) flags.level_base_mb = ParseInt("level_base_mb", v);
+    else if (ParseFlag(a, "l0_trigger", &v)) flags.l0_trigger = ParseInt("l0_trigger", v);
+    else if (ParseFlag(a, "dynamic_level_bytes", &v)) flags.dynamic_level_bytes = ParseInt("dynamic_level_bytes", v);
     else { std::fprintf(stderr, "unknown flag: %s\n", a); std::exit(2); }
   }
 }
@@ -315,9 +331,11 @@ void WorkerLoop(Shared* s, int tid) {
 int Run() {
   std::fprintf(stderr,
       "[config] rocksdb db=%s num=%" PRIu64 " cache_mb=%d threads=%d "
-      "policy=%s key_dist=%s duration=%d warmup=%d\n",
+      "policy=%s key_dist=%s duration=%d warmup=%d level_base_mb=%d l0_trigger=%d "
+      "dynamic_level_bytes=%d warm_mode=%s\n",
       flags.db.c_str(), flags.num, flags.cache_mb, flags.threads,
-      flags.policy.c_str(), flags.key_dist.c_str(), flags.duration, flags.warmup);
+      flags.policy.c_str(), flags.key_dist.c_str(), flags.duration, flags.warmup,
+      flags.level_base_mb, flags.l0_trigger, flags.dynamic_level_bytes, flags.warm_mode.c_str());
 
   std::unique_ptr<leaper_rocksdb::Adapter> adapter;
   if (flags.policy == "leaper") {
@@ -332,6 +350,7 @@ int Run() {
     ao.core.precursor_path = flags.precursors;
     ao.num_ranges = flags.num / flags.leaper_range_size + 1;
     ao.warm_scan_keys = flags.warm_scan_keys;
+    ao.warm_mode = flags.warm_mode;
     for (int k = 1; k <= flags.model_steps; ++k) {
       char path[512];
       std::snprintf(path, sizeof(path), "%s.step%d.txt", flags.model_prefix.c_str(), k);
@@ -352,6 +371,10 @@ int Run() {
   opts.compression = rocksdb::kNoCompression;
   opts.statistics = rocksdb::CreateDBStatistics();
   opts.max_background_jobs = 2;
+  opts.max_bytes_for_level_base = static_cast<uint64_t>(flags.level_base_mb) * 1024 * 1024;
+  opts.max_bytes_for_level_multiplier = 10;
+  opts.level0_file_num_compaction_trigger = flags.l0_trigger;
+  opts.level_compaction_dynamic_level_bytes = flags.dynamic_level_bytes != 0;
   if (flags.row_cache_mb > 0) {
     opts.row_cache = rocksdb::NewLRUCache(
         static_cast<size_t>(flags.row_cache_mb) * 1024 * 1024);
@@ -371,7 +394,10 @@ int Run() {
         rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushAndCompaction;
   }
   opts.table_factory.reset(rocksdb::NewBlockBasedTableFactory(bbt));
-  if (adapter != nullptr) opts.listeners.push_back(adapter->listener());
+  if (adapter != nullptr) {
+    opts.listeners.push_back(adapter->listener());
+    adapter->SetTableFactory(opts.table_factory, opts.comparator);
+  }
 
   if (flags.fill) rocksdb::DestroyDB(flags.db, rocksdb::Options());
   // RocksDB 11 changed DB::Open to hand back a unique_ptr.
@@ -538,10 +564,14 @@ int Run() {
     const leaper::Stats ls = adapter->stats();
     std::fprintf(stderr,
         "[leaper] reads_seen=%" PRIu64 " inferences=%" PRIu64 " (%.2f us/inf) "
-        "hot=%" PRIu64 " warmed_ranges=%" PRIu64 " warm_us=%" PRIu64 "\n",
+        "hot=%" PRIu64 " warmed_ranges=%" PRIu64 " warm_us=%" PRIu64
+        " warm_mode=%s warmed_blocks=%" PRIu64 " warm_files=%" PRIu64
+        " warm_open_failed=%" PRIu64 "\n",
         ls.reads_seen, ls.inferences,
         ls.inferences ? static_cast<double>(ls.inference_us) / ls.inferences : 0.0,
-        ls.ranges_predicted_hot, adapter->warmed_ranges(), adapter->warm_us());
+        ls.ranges_predicted_hot, adapter->warmed_ranges(), adapter->warm_us(),
+        flags.warm_mode.c_str(), adapter->warmed_blocks(), adapter->warm_files(),
+        adapter->warm_open_failed());
   }
   for (auto* h : shared.read_hist) delete h;
   for (auto* h : shared.write_hist) delete h;

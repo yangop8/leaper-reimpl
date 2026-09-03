@@ -128,3 +128,8 @@ $PY tools/summarize_matrix.py $OUT m7v3 | grep -v missing
 for K in 40000 12000; do f=$OUT/m7v3_scan${K}_leaper.timeseries.csv; [ -f "$f" ] && awk -F, -v k=$K 'NR>1{h+=$6;l+=$5} END{printf "  leaper, warm_scan_keys=%s: hit ratio %.2f%%\n", k, 100*h/l}' "$f"; done
 sec "H14 hot lifetime: slow 128 MB / 40 s, NVMe 128 MB / 2 s"
 for T in m4_slow128_life40 m4_nvme_life2; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,7p'; done
+sec "H15 RocksDB on LevelDB's tree shape (level_base_mb=10): m7v5, incl. block-level sst warming"
+$PY tools/summarize_matrix.py $OUT m7v5 | grep -v missing
+for K in off leaper sst_leaper; do f=$OUT/m7v5_$K.timeseries.csv; [ -f "$f" ] && awk -F, -v k=$K 'NR>1{h+=$6;l+=$5} END{printf "  %-12s background lookups %s (hits %s)\n", k, $27, $28}' "$f"; done
+sec "H16 RocksDB, classic leveling (dynamic_level_bytes=0): m7v6"
+$PY tools/summarize_matrix.py $OUT m7v6 | grep -v missing

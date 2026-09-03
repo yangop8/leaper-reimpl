@@ -118,6 +118,18 @@ compaction throughput (59 → 36 compactions in 180 s). The repository charges
 that cost to the compaction thread by default and, optionally, to a
 separate thread (`--warm_async`); the two bracket a real device.
 
+**The size of the cache-invalidation problem is the engine's write
+amplification, and the two engines differ by an order of magnitude on the
+same workload.** Under identical writes for 300 s, LevelDB ran 261
+compactions and rewrote 9.6 GB (write amplification ~70: a 10 MB L1 under
+whole-key-space writes moves one 4 MB file at a time into the 40 MB of L2 it
+overlaps); RocksDB ran ~50 and rewrote 0.45-0.67 GB (~3-5), with or without
+dynamic level sizing. A prefetcher can only recover what compaction
+destroys, so the same model with the same block-level warming is +2.9pp on
+LevelDB and +0.14pp on RocksDB. Two earlier explanations for the RocksDB
+null — the iterator-based warming, and a race between concurrent jobs in the
+adapter — were real defects and were fixed, and neither was the cause.
+
 **The two phases pull in opposite directions on LevelDB.** Prefetch alone is
 +0.87pp on slow storage; adding the eviction phase makes it +0.59pp. The
 step-1 model's recall is 0.807, so a fifth of the ranges that will be read
@@ -154,7 +166,7 @@ cmake --build build -j
 `scripts/setup.sh` prints the extra steps for the RocksDB half, which needs a
 full RocksDB build.
 
-Two tests are load-bearing rather than decorative:
+Three tests are load-bearing rather than decorative:
 
 * `gbdt_check` verifies the hand-written LightGBM text-model scorer against
   LightGBM's own predictions (measured: mean |diff| 3.7e-9, max 3.0e-8 over 2000
@@ -164,6 +176,11 @@ Two tests are load-bearing rather than decorative:
   LevelDB's `FindShortSuccessor` turns a 16-digit key into the single character
   `"1"` — which, restored to full width, is range id 25 billion and used to
   allocate until the process was killed.
+* `sst_warm_check` (RocksDB) proves that an `SstFileReader` sharing the DB's
+  table factory inserts blocks under the same cache keys the DB's own reader
+  looks up — warm a range through the reader, `Get` it through the DB with
+  `PerfContext` on, require zero block reads. This is what lets the RocksDB
+  adapter warm at block granularity without a patch (`--warm_mode=sst`).
 
 ## Reproducing
 
@@ -204,13 +221,16 @@ regime (`CACHE_MB`, `READ_DELAY_US`, `OP_RATE`, `WRITE_CORR`, `RANGE_SIZE`, ...)
   real Twitter samples). A floor on the range count is added for the synthetic
   case, and there the reported range size is determined by that floor rather
   than by the paper's criterion.
-* **No phase 1 on RocksDB, and phase 2 is structurally weaker there.** Block
-  cache keys derive from a per-file `OffsetableCacheKey` inside the table
-  reader, so eviction is not implementable as a plug-in, and the zero-patch
-  adapter can only warm by scanning predicted-hot ranges through a DB
-  iterator rather than by touching the compaction's output blocks. Its
-  result on RocksDB is a null within noise; see H12-H13 for what a longer
-  scan does.
+* **No phase 1 on RocksDB.** Block cache keys derive from a per-file
+  `OffsetableCacheKey` inside the table reader, so eviction is not
+  implementable as a plug-in. Phase 2 *is*: `--warm_mode=sst` opens the
+  job's output files through an `SstFileReader` that shares the DB's table
+  factory and warms exactly the output blocks in predicted-hot ranges, no
+  patch needed (`sst_warm_check` proves the cache keys match). With that in
+  place Leaper is the best of the RocksDB policies every time (+0.13 to
+  +0.15pp) and every time the margin is at the noise floor, because RocksDB
+  compacts an order of magnitude less than LevelDB on this workload — see
+  the finding above and H15-H16.
 * **Latency results are from an emulated slow device**, not real spinning disks.
 
 ## Licence

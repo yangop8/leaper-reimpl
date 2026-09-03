@@ -9,7 +9,8 @@ kFlushAndCompaction      81.33%    -0.10pp     40075    +0.1%       13       22 
 Leaper (both phases)     81.39%    -0.04pp     40089    +0.1%       12       20    2,058,197    335      -
 Leaper + row cache       78.81%    -2.63pp     40045    -0.0%       13       23    2,052,167    336      -
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 
 ################ E2 unthrottled overhead, NVMe (m4_ovh) -- the paper's 0.95% ################
@@ -21,7 +22,8 @@ EagerEvict               98.66%    -0.04pp    873839    -9.8%       12       19 
 WarmAll                  98.64%    -0.06pp    881312    -9.1%       12       19    1,424,379    101      -
 Leaper (prefetch only)     98.77%    +0.06pp    961808    -0.7%       10       17    1,408,870     98      -
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 
 policy                miss rate win  vs stock  hit in win  hit out  spikes   QPS out  overhead  inval blk   warmed  pf prec
@@ -35,6 +37,7 @@ miss rate win / vs stock : the paper's 'cache misses eliminated' (Table 4), as a
 hit out                  : hit ratio outside the windows -- where prefetched blocks pay off
 -- with collector sampling P=0.01 (m4_ovh_s01):
 Leaper (both phases)  (missing)
+Leaper (sst warm)     (missing)
 Leaper (prefetch only)     98.81%    +0.00pp    990495    +0.0%       10       16    1,402,874     98      -
 Leaper (prefetch, SSAD)  (missing)
 Leaper + row cache    (missing)
@@ -62,7 +65,8 @@ WarmAll                  47.58%    +5.69pp      8030    -0.1%      475      920 
 Leaper (prefetch only)     43.20%    +1.31pp      8042    +0.1%      519      933    1,077,563     53      -
 Oracle                   45.07%    +3.19pp      8039    +0.1%      364      691      996,667     44      -
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 ----------------------------------------------------------------------------------------------------------------------------
 off                          58.68%     +0.0%      41.32%   50.74%       0     8,042    +0.00%          0        0        -
@@ -82,7 +86,8 @@ WarmAll                  25.89%    +2.92pp      8038    +0.1%      351      377 
 Leaper (prefetch only)     25.10%    +2.14pp      8030    -0.0%      350      364    1,242,316     51      -
 Leaper (prefetch, SSAD)     24.78%    +1.82pp      8049    +0.2%      349      394    1,284,519     56      -
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 head: illegal line count -- 0
 
@@ -99,7 +104,8 @@ Leaper (both phases)     37.80%    +0.98pp      8040    +0.0%      345      356 
 Leaper (prefetch only)     38.36%    +1.54pp      8033    -0.1%      404      575    1,038,792     54      -
 Oracle                   39.19%    +2.37pp      8031    -0.1%      513      839      957,164     43      -
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 
 policy                miss rate win  vs stock  hit in win  hit out  spikes   QPS out  overhead  inval blk   warmed  pf prec
@@ -125,7 +131,8 @@ Leaper (both phases)     74.22%    +1.52pp     40221    +0.0%       21       37 
 Leaper (prefetch only)     76.34%    +3.63pp     40219    +0.0%       27       65    3,071,296    246      -
 Oracle                   77.59%    +4.89pp     40199    -0.0%       19       29    2,919,648    253      -
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 
 policy                miss rate win  vs stock  hit in win  hit out  spikes   QPS out  overhead  inval blk   warmed  pf prec
@@ -160,7 +167,8 @@ WarmAll                  29.18%    +0.85pp      8042    +0.3%      336      362 
 Leaper (prefetch only)     29.66%    +1.33pp      8044    +0.4%      335      349    1,193,262     55      -
 Leaper (prefetch, SSAD)     29.68%    +1.35pp      8016    +0.0%      281      296    1,197,644     57      -
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
   leaper_p2only        before shift 33,63%  after shift 21,91%  suspended 0 s
   leaper_p2only_ssad   before shift 34,04%  after shift 21,34%  suspended 0 s
@@ -174,7 +182,8 @@ WarmAll                  42.45%    +1.92pp      8012    -0.0%      280      534 
 Leaper (prefetch only)     42.51%    +1.98pp      8018    +0.0%      319      610    1,101,680     58      -
 Oracle                   42.23%    +1.71pp      8011    -0.0%      275      527    1,100,254     56      -
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 ----------------------------------------------------------------------------------------------------------------------------
 off                          60.83%     +0.0%      39.17%   46.12%       0     8,014    +0.00%          0        0        -
@@ -200,7 +209,8 @@ Leaper (both phases)     46.29%    +0.59pp      8025    +0.1%      324      337 
 Leaper (prefetch only)     46.56%    +0.87pp      8011    -0.0%      276      292      622,327     58    33%
 Oracle                   46.02%    +0.33pp      8018    +0.1%      312      325      630,431     50    30%
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 
 policy                miss rate win  vs stock  hit in win  hit out  spikes   QPS out  overhead  inval blk   warmed  pf prec
@@ -228,7 +238,8 @@ Leaper (both phases)     86.63%    +3.28pp     40125    -0.1%       21       32 
 Leaper (prefetch only)     86.57%    +3.23pp     40097    -0.2%       18       30    1,432,391    254    19%
 Oracle                   88.79%    +5.45pp     40087    -0.2%       17       28    1,195,198    253    19%
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 
 policy                miss rate win  vs stock  hit in win  hit out  spikes   QPS out  overhead  inval blk   warmed  pf prec
@@ -265,7 +276,8 @@ WarmAll                  31.96%    -2.63pp      8016    -0.0%      282      300 
 Leaper (prefetch only)     34.90%    +0.31pp      8013    -0.1%      278      297      759,927     57    32%
 Leaper (prefetch, SSAD)     35.18%    +0.59pp      8019    +0.0%      287      305      756,579     59    33%
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
   m4_drift_v3_off                            before 39,73%  after 24,37%  suspended 0 s
   m4_drift_v3_warm_all                       before 37,47%  after 20,99%  suspended 0 s
@@ -282,7 +294,8 @@ WarmAll                  49.46%    -1.24pp      8014    -0.0%      294      551 
 Leaper (prefetch only)     51.78%    +1.08pp      8023    +0.1%      302      569      661,237     58    29%
 Oracle                   51.93%    +1.23pp      8020    +0.0%      302      564      667,478     54    28%
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
 ----------------------------------------------------------------------------------------------------------------------------
 off                          49.18%     +0.0%      50.82%   50.29%       0     8,017    +0.00%          0        0        -
@@ -343,14 +356,14 @@ WarmAll                  42.37%    +0.00pp      8016    +0.0%      412      557 
 Leaper (prefetch only)     46.51%    +4.14pp      8020    +0.1%      321      346      623,259     57    32%
 Oracle                   46.96%    +4.59pp      8017    +0.0%      327      414      617,931     59    33%
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
 -- m4_zipf0.99_v3a
 ----------------------------------------------------------------------------------------------------------
 WarmAll                  53.36%    +0.00pp      8019    +0.0%      276      286      180,298     36    49%
 Leaper (prefetch only)     53.26%    -0.09pp      8018    -0.0%      277      287      180,710     36    49%
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
-lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 
 ################ H12/H13 RocksDB (m7v3; scan 40000/12000 keys per range) ################
 
@@ -360,9 +373,11 @@ LRU (stock)              81.86%    +0.00pp     40062    +0.0%       18       28 
 kFlushOnly               81.87%    +0.01pp     40082    +0.0%       25       31    1,971,396    335    10%
 kFlushAndCompaction      81.79%    -0.07pp     40056    -0.0%       19       27    1,978,581    337    10%
 Leaper (both phases)     81.92%    +0.06pp     40086    +0.1%       24       30    1,965,796    337    10%
+Leaper (sst warm)        82.00%    +0.13pp     40167    +0.3%       23       28    1,962,170    335    10%
 Leaper + row cache       79.32%    -2.54pp     40129    +0.2%       29       35    1,969,082    336    11%
 
-comps: compactions completed in the measured window; bg lk: share of all block cache
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
 lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
   leaper, warm_scan_keys=40000: hit ratio 82,23%
   leaper, warm_scan_keys=12000: hit ratio 82,01%
@@ -380,3 +395,33 @@ LRU (stock)              64.57%    +0.00pp     40085    +0.0%       26       38 
 EagerEvict               65.35%    +0.78pp     40191    +0.3%       20       30    3,715,313    273    20%
 WarmAll                  65.30%    +0.73pp     40214    +0.3%       21       31    3,723,007    273    20%
 Leaper (prefetch only)     66.48%    +1.91pp     40139    +0.1%       20       29    3,589,783    273    20%
+
+################ H15 RocksDB on LevelDB's tree shape (level_base_mb=10): m7v5, incl. block-level sst warming ################
+
+policy                hit ratio    vs LRU       QPS   vs LRU   p95 us   p99 us       misses  comps  bg lk
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              82.68%    +0.00pp     40149    +0.0%       23       29    1,876,922    656    10%
+kFlushOnly               82.72%    +0.04pp     40153    +0.0%       24       30    1,873,544    674    10%
+kFlushAndCompaction      82.44%    -0.24pp     40140    -0.0%       26       32    1,902,068    684    10%
+Leaper (both phases)     82.73%    +0.05pp     40111    -0.1%       26       32    1,870,031    663    12%
+Leaper (sst warm)        82.83%    +0.14pp     40162    +0.0%       26       32    1,862,640    653    10%
+
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
+lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
+  off          background lookups 1262427 (hits 954352)
+  leaper       background lookups 1512334 (hits 1173100)
+  sst_leaper   background lookups 1261796 (hits 970304)
+
+################ H16 RocksDB, classic leveling (dynamic_level_bytes=0): m7v6 ################
+
+policy                hit ratio    vs LRU       QPS   vs LRU   p95 us   p99 us       misses  comps  bg lk
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              81.73%    +0.00pp     40145    +0.0%       26       31    1,981,172    452    10%
+kFlushOnly               81.66%    -0.07pp     40118    -0.1%       23       28    1,987,354    446    10%
+kFlushAndCompaction      81.55%    -0.18pp     40184    +0.1%       24       29    2,003,132    438    10%
+Leaper (sst warm)        81.86%    +0.13pp     40160    +0.0%       23       28    1,967,957    450    10%
+
+comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+       (RocksDB, whose harness records bytes); bg lk: share of all block cache
+lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)

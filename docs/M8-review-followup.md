@@ -794,3 +794,103 @@ lifetimes at 8,000 ops/s on a 64 MB cache) is the bottom-left corner, where
 nothing pays, and the early conclusion that "WarmAll dominates" was a
 statement about that corner, measured with two defects on top. Neither
 corner is the whole picture; the map is.
+
+### H15 — RocksDB: the null result explained, and block-level warming without a patch
+
+Three things were wrong on the RocksDB side, found in this order.
+
+**The seventh defect — concurrent jobs shared one prediction.** RocksDB runs
+flushes and compactions on separate background threads
+(`max_background_jobs = 2`); LevelDB has one. The adapter kept a single
+`pending_` list of the ranges chosen at a job's Begin and consumed it at the
+next End — whichever job's End came first — and the core's own per-job
+prediction (`hot_t2_`) could be overwritten by a concurrent Begin before the
+first job had finished choosing. Fixed by keying the chosen list by RocksDB's
+job id and serialising predict-and-choose. Real, but it turned out not to be
+what was holding the result down: with the fix, the H12 method moves from
+81.92% to 81.93%.
+
+**Block-level warming without a patch.** RocksDB's block cache key is derived
+from the SST's own properties (`db_session_id`, `orig_file_number`;
+`BlockBasedTable::SetupBaseCacheKey`), so a reader that opens one of the DB's
+files with the DB's table factory shares its cache *and* its keys.
+`sst_warm_check` proves it end to end: warm a range through an
+`SstFileReader`, `Get` the same keys through the DB with `PerfContext` on,
+zero block reads from the file. The adapter's `--warm_mode=sst` opens each
+output file the job reports (`CompactionJobInfo::output_files`,
+`FlushJobInfo::file_path`) and reads only the blocks inside a predicted-hot
+range — what the LevelDB hook does, with no change to RocksDB. On the H12
+configuration it warms 34.7k blocks from 98 files and lands at 82.01%
+(+0.15pp): the mechanism works, and it still does not matter.
+
+**The actual cause: there was almost nothing to prefetch for.** The RocksDB
+harness left `max_bytes_for_level_base` at RocksDB's default of 256 MB;
+LevelDB's L1 is hard-coded to 10 MB. On a 480 MB database that difference
+is the difference between **5 compactions and 254** in the same 300 s under
+the same writes (RocksDB's `LOG`: 91 flushes, 5 compactions, each ~0.25 s).
+Flushes do not invalidate anything — they create files — so the cache
+invalidation the paper is about occurred five times in five minutes, and
+the inference count confirms it: 22.7k inferences over the run is ~50 jobs
+of 101 candidate ranges, against ~350 jobs on LevelDB. All RocksDB
+"engine comparison" numbers before this point (E1, H12-H13) compared
+LevelDB to a RocksDB that was hardly compacting. The bench now takes
+`--level_base_mb` and `--l0_trigger`; with `level_base_mb=10` RocksDB has
+LevelDB's tree shape.
+
+Same regime as H12 (NVMe, 128 MB, 300 s), RocksDB with `level_base_mb=10`
+and the job-id fix; the Leaper rows use the m7v3 models:
+
+| policy | hit ratio | vs stock | compaction writes in window |
+|---|---|---|---|
+| stock | 82.68% | — | 656 MB |
+| `kFlushOnly` | 82.72% | +0.04pp | |
+| `kFlushAndCompaction` | 82.44% | -0.24pp | |
+| Leaper, DB-iterator warming (4,096 keys per range) | 82.73% | +0.05pp | |
+| Leaper, block-level `sst` warming (66,947 blocks from 225 files, 0 failures) | 82.83% | +0.14pp | 653 MB |
+
+Still nothing, and the last column says why the level size did not help
+either. In the same 300 s, under the same 22 flushes of the same writes:
+
+| engine | compactions | compaction output | flush output |
+|---|---|---|---|
+| LevelDB (H2 stock run) | 261 | **9,556 MB** | 139 MB |
+| RocksDB (`level_base_mb=10`, stock run) | 49 | **672 MB** | 126 MB |
+
+**LevelDB rewrites fourteen times as much data as RocksDB on this workload,
+so it invalidates fourteen times as much cache.** The first suspect was
+RocksDB's dynamic level sizing (`level_compaction_dynamic_level_bytes`, on
+by default since 8.4, which is why the output levels in its log are 4-6);
+H16 turns it off and the volume does not change. The difference is in how
+the two pickers move data. RocksDB's leveled compaction here runs at a write
+amplification of 3-5 under either level policy. LevelDB's, with a 10 MB L1
+under writes spread across the whole key space, spends 239 of its 261
+compactions moving one 4 MB L1 file at a time into the ~40 MB of L2 it
+overlaps (median compaction 41 MB, 9,355 of the 9,556 MB), for a write
+amplification near 70. The cache invalidation problem the paper describes is
+proportional to that number; on RocksDB it is an order of magnitude smaller
+than on LevelDB for this workload, and there is correspondingly little for
+any prefetcher to recover. That — not the adapter, and not the model — is
+what the RocksDB null result measures. The engine comparison this repository
+set out to make turns out to be a comparison of compaction volumes first.
+
+### H16 — RocksDB with classic leveling
+
+`dynamic_level_bytes=0`, `level_base_mb=10`, L0 trigger 4; otherwise H15.
+
+| policy | hit ratio | vs stock | compaction writes in window |
+|---|---|---|---|
+| stock | 81.73% | — | 452 MB |
+| `kFlushOnly` | 81.66% | -0.07pp | 446 MB |
+| `kFlushAndCompaction` | 81.55% | -0.18pp | 438 MB |
+| Leaper, block-level `sst` warming (50,453 blocks, 171 files, 0 failures) | **81.86%** | +0.13pp | 450 MB |
+
+Same volume as with dynamic levels, same ordering, same size of effect:
+Leaper's block-level warming is the best of the four every time it is run
+on RocksDB (+0.13 to +0.15pp, with `kFlushAndCompaction` at -0.18 to
+-0.24pp), and every time the margin sits at RocksDB's ~0.2pp noise floor,
+because ~450-670 MB of compaction per five minutes against a 128 MB cache
+is not much invalidation. The mechanism is now the same on both engines and
+verified on both; what a RocksDB result *with* a margin needs is a
+configuration that compacts as much as LevelDB does — a database much
+larger than its level targets, heavier writes, or universal compaction —
+which is the next experiment, not a fix.

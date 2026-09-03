@@ -27,9 +27,14 @@ RANGE=40000
 SLOT=1.0
 WARMUP=30
 
+# LSM geometry. RocksDB's default L1 of 256 MB gives this database five
+# compactions in five minutes; LevelDB's hard-coded 10 MB gives ~250. The
+# engine comparison only means something on the same shape of tree, so the
+# default here is LevelDB's; LEVEL_BASE_MB=256 reproduces the pre-H15 runs.
 WORKLOAD=(
   --num=4000000 --value_size=100 --cache_mb=128 --write_buffer_mb=8
   --max_file_mb=4 --block_kb=4
+  --level_base_mb=${LEVEL_BASE_MB:-10} --l0_trigger=${L0_TRIGGER:-4}
   --key_dist=lifecycle --life_range_size=$RANGE --life_hot_slots=16
   --life_lifetime_s=8 --life_ramp_frac=0.25 --life_chain=4 --life_chain_lag=0.2
   --threads=4 --read_ratio=0.75 --update_ratio=0.20
@@ -53,7 +58,7 @@ BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${TAG}.calibration.txt" | cut -
 echo "calibrated alpha=$ALPHA beta=$BETA"
 
 echo "=== 3/3 policy matrix (seed 1234) ==="
-for POL in ${POLICIES:-off flush_only flush_and_compaction leaper leaper_rowcache}; do
+for POL in ${POLICIES:-off flush_only flush_and_compaction leaper sst_leaper leaper_rowcache}; do
   echo "--- $POL ---"
   EXTRA=()
   RUNPOL="$POL"
@@ -63,6 +68,15 @@ for POL in ${POLICIES:-off flush_only flush_and_compaction leaper leaper_rowcach
              --precursors="$OUT/${TAG}.model.precursors.txt"
              --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
              --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA") ;;
+    sst_leaper)
+      # Block-level warming of the job's own output files through an
+      # SstFileReader that shares the DB's block cache (see sst_warm_check).
+      RUNPOL=leaper
+      EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
+             --precursors="$OUT/${TAG}.model.precursors.txt"
+             --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
+             --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA"
+             --warm_mode=sst) ;;
     leaper_rowcache)
       # The paper's rows go to a KV cache; RocksDB has one. Same block cache
       # budget plus a 32 MB row cache, to see whether the prefetcher's
