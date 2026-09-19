@@ -1116,3 +1116,86 @@ carried a conclusion: H1 (slow storage, 64 MB), H2 (NVMe, 128 MB), H14 (slow,
 10 GB table) and H18-C (IM at its own size). The remaining configurations —
 the rest of H10, H4-H6, H11, H18-B and H18-D — stand as measured before these
 fixes and are marked so where they are quoted. Results follow in section I.
+
+## I — after the review fixes
+
+Tags `_v4`. Same protocol, all models retrained with the corrected timestamp
+feature, RocksDB calibrated against the real cache size. A first attempt ran
+while another project's five processes held the machine at a load of 20-30;
+its stock run came out with ten times the tail latency and half the
+compactions of the same configuration on a quiet machine, so it was
+discarded and the chain re-run behind a gate that waits for the load to
+drop below 3. The numbers below were measured at a load of about 1.
+
+**LevelDB.** Change against the pre-review v3 rows in parentheses; the
+same-seed noise on these tables is 0.3pp (H8).
+
+| slow storage, 64 MB (H1) | hit ratio | vs LRU | vs floor | blocks warmed | precision |
+|---|---|---|---|---|---|
+| LRU | 45.95% | — | — | — | — |
+| EagerEvict (floor) | 46.80% | +0.86pp (+0.01) | — | — | — |
+| IncrementalWarmup | 43.49% | -2.45pp (+0.26) | -3.31pp | 218k | 0.047 |
+| WarmAll | 43.94% | -2.00pp (+0.42) | -2.86pp | 276k | 0.036 |
+| WarmFlushOnly | 46.72% | +0.77pp (**-0.55**) | -0.09pp | 7.8k | 0.029 |
+| Leaper (both phases) | 46.58% | +0.64pp (+0.05) | -0.22pp | 48k | 0.094 |
+| Leaper (prefetch only) | 46.47% | +0.53pp (-0.34) | -0.33pp | 47k | 0.095 |
+| Oracle (W=1) | 46.02% | +0.07pp (-0.26) | -0.79pp | 130k | 0.100 |
+
+| NVMe, 128 MB (H2) | hit ratio | vs LRU | vs floor | precision |
+|---|---|---|---|---|
+| LRU | 83.54% | — | — | — |
+| EagerEvict (floor) | 83.81% | +0.27pp (-0.06) | — | — |
+| IncrementalWarmup | 84.74% | +1.21pp (+0.49) | +0.94pp | 0.212 |
+| WarmAll | 83.58% | +0.04pp (-0.10) | -0.23pp | 0.121 |
+| WarmFlushOnly | 83.75% | +0.21pp (-0.13) | -0.06pp | 0.089 |
+| Leaper (both phases) | 86.83% | +3.29pp (+0.01) | +3.02pp | 0.737 |
+| Leaper (prefetch only) | **86.79%** | **+3.25pp** (+0.02) | **+2.98pp** | 0.723 |
+| Oracle (W=1) | 88.79% | +5.26pp (-0.19) | +4.98pp | 0.875 |
+
+| slow storage, 128 MB, 40 s lifetimes (H14) | hit ratio | vs LRU | vs floor | precision |
+|---|---|---|---|---|
+| LRU | 78.62% | — | — | — |
+| EagerEvict (floor) | 80.18% | +1.56pp (+0.57) | — | — |
+| WarmAll | 82.11% | +3.49pp (+0.12) | +1.93pp | 0.193 |
+| WarmFlushOnly | 80.18% | +1.56pp (new) | 0.00pp | 0.031 |
+| Leaper (prefetch only) | **86.75%** | **+8.13pp** (+0.23) | **+6.57pp** | 0.753 |
+
+The two headline LevelDB results, H2 and H14, are unchanged to within
+noise: +3.0pp and +6.6pp over the floor. What the fixes did change is the
+small-cache slow-storage table, in one place and in the direction the
+defects predicted. Before the review, `WarmFlush` had the flush flag left
+set by every nested flush, so it warmed part of each enclosing compaction's
+output as well; with that gone it drops 0.55pp and lands exactly on the
+floor. Leaper now warms 47k blocks there instead of 37k — flush outputs and
+the post-flush remainder of each compaction, as intended — and gains
+nothing from them, because in that regime nothing does: every policy that
+warms little sits at the floor within noise, and the two that warm a lot
+lose 2-3 points. The earlier statement that flush-only warming "wins" on
+slow storage does not survive; the corrected statement is that on a cache
+smaller than the working set no warming policy beats reclaiming dead
+blocks. The "two phases pull in opposite directions" observation does not
+survive either: with the nesting fixed, both-phases and prefetch-only are
+within 0.1pp of each other on both devices.
+
+**RocksDB.** Change against H17/H18 in parentheses.
+
+| | stock | `kFlushOnly` | `kFlushAndCompaction` | Leaper, block-level |
+|---|---|---|---|---|
+| paper scale, lifecycle 60 s (H17) | 90.11% | +1.40pp (+0.01) | +1.29pp (-0.01) | **+1.56pp** (+0.01) |
+| IM shape on a 10 GB table (H18-A) | 54.60% | +1.83pp (+0.01) | +6.49pp (+0.02) | **+8.36pp** (-0.35) |
+| IM at its own 8m-row size (H18-C) | 70.20% | +8.17pp (-0.13) | **+19.11pp** (-0.12) | +15.35pp (-0.13) |
+
+Nothing moved. The calibration defect (13) turned out not to change the
+prediction horizon on these workloads: correctly calibrated, the recovery
+window is 1.0 s on the first two configurations and 2.0 s on the third,
+which round to the same one or two steps the mis-calibrated runs had used.
+The timestamp fix (14) moved the lifecycle results by 0.01pp and the
+stationary-zipf ones by up to 0.35pp, consistent with those features
+carrying little transferable signal across seeds (the review said as much
+in its caveat). The RocksDB conclusions of H17 and H18 stand as written.
+
+**Net effect of the review on the repository's claims.** Eight real
+defects, one of which (16) broke the build for anyone but the author; the
+measurements they touched change by less than the noise floor everywhere
+except one table, where a baseline's advantage was an artefact and is gone.
+The README's headline numbers are replaced by the `_v4` rows above.

@@ -137,3 +137,6 @@ sec "H17 RocksDB at the paper's scale (10 GB data, 3 GB cache): m7paper2 = churn
 for T in m7paper2 m7paper3 m7paper3r; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T | grep -v missing | sed -n '3,7p'; done
 sec "H18 the paper's two real workloads, stationary (A/B = 10 GB table, C/D = the tables' own sizes)"
 for T in m7zipf09 m7zipf03 m7fit_im m7fit_ec; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T | grep -v missing | sed -n '3,9p'; done
+sec "I  after the 2026-09-19 review fixes (_v4 tags, models retrained)"
+for T in m4_slow_v4 m4_nvme_v4 m4_slow128_life40_v4; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,11p'; $PY tools/paper_metrics.py $OUT $T --t2=2 2>/dev/null | sed -n '5,13p'; done
+for T in m7paper3_v4 m7zipf09_v4 m7fit_im_v4; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,7p'; done

@@ -30,10 +30,9 @@ measurements here as evidence about this setup, not as a verdict on the
 paper.**
 
 **Sixteen defects were found in this harness, two of which invalidated every
-hit ratio measured before them, and the last eight of which came from an
-independent code review on 2026-09-19 whose fixes are being re-measured as
-this is written (the numbers below are the pre-review ones until section I of
-the M8 document replaces them).** Compaction-output warming silently failed
+hit ratio measured before them; the last eight came from an independent code
+review on 2026-09-19 (`docs/code-review-2026-09-19.md`), and the numbers
+below were re-measured with them fixed.** Compaction-output warming silently failed
 for months of work because a hook fired before the output file was synced, and
 the hit ratio counted the engine's own compaction reads as workload lookups,
 which handed a free 2pp to whichever policy slowed compaction down the most.
@@ -73,15 +72,15 @@ a policy's distance from that floor (`EagerEvict`), not from LRU:
 
 | regime | Leaper vs floor | warm everything vs floor |
 |---|---|---|
-| cache smaller than the working set | 0 | -3.3 to -5.8pp |
-| cache ≈ working set (the paper's regime) | **+2.9pp** | -0.2pp |
-| same, with hot ranges living 5x longer | **+6.9pp** | +2.4pp |
+| cache smaller than the working set | 0 | -2.9 to -5.8pp |
+| cache ≈ working set (the paper's regime) | **+3.0pp** | -0.2pp |
+| same, with hot ranges living 5x longer | **+6.6pp** | +1.9pp |
 | cache larger than the working set | +2.65pp | **+7.0pp** |
 
 Above the band, recall beats precision and warming everything wins. Below it,
 nothing helps and warming everything actively costs several points. The device
 is not what separates these cases: the same 128 MB cache on emulated slow
-storage gives Leaper nothing at an 8 s hot lifetime and +6.9pp at 40 s.
+storage gives Leaper nothing at an 8 s hot lifetime and +6.6pp at 40 s.
 
 Run-to-run noise, same seed and binary, is 0.3pp on the slow-storage tables,
 0.2pp on NVMe and 0.01pp on the RocksDB paper-scale configuration. Differences
@@ -103,10 +102,13 @@ separate baseline here rather than part of Leaper's score.
 
 **A learned prefetcher's real competitors are "warm everything" and "warm
 flush outputs only", not LRU.** Both are trivial, and RocksDB ships them
-(`prepopulate_block_cache`). On emulated slow storage with a small cache, the
-cheapest policy wins outright: warming flush outputs alone is +1.3pp for 8,000
-warmed blocks and no model, because the blocks a flush writes are the records
-just written, which under a write-then-read workload are the hottest there are.
+(`prepopulate_block_cache`). On a cache smaller than the working set no
+warming policy beats reclaiming dead blocks: the ones that warm little
+(flush outputs only, Leaper, a one-interval oracle) sit on that floor within
+noise and the ones that warm a lot lose 2-3 points. An earlier version of
+this file had flush-only warming winning that regime by half a point; that
+was the ninth defect, a nested flush leaving its flag set so the policy also
+warmed part of each compaction, and it is gone.
 
 **The size of the cache-invalidation problem is the engine's write
 amplification, and two engines differ by an order of magnitude on the same
@@ -143,11 +145,13 @@ harness can charge that cost to the compaction thread (the default) or to a
 separate thread (`--warm_async`), and the two bracket what a real device would
 do. The verdict does not change between them.
 
-**The two phases pull in opposite directions on LevelDB.** Prefetch alone is
-+0.87pp on slow storage; adding the eviction phase makes it +0.59pp. The
-step-1 model's recall is 0.79 at precision 0.97, so a fifth of the ranges that
-will be read are predicted cold and their blocks are dropped while the input
-files are still serving reads.
+**Phase 1, the eviction phase, adds nothing measurable on LevelDB.** With
+and without it Leaper is within 0.1pp on both devices. The step-1 model's
+recall is 0.80 at precision 0.97, so a fifth of the ranges that will be read
+are predicted cold and their input blocks dropped early, and the cache gives
+that back almost exactly. An earlier version of this file had the two phases
+pulling in opposite directions; that was measured with the ninth and
+eleventh defects present.
 
 ## Results
 
@@ -158,31 +162,32 @@ configurations, in [`docs/M8-review-followup.md`](docs/M8-review-followup.md).
 
 | policy | hit ratio | vs LRU | prefetch precision |
 |---|---|---|---|
-| LRU (stock) | 83.34% | — | — |
-| EagerEvict | 83.68% | +0.33pp | — |
-| IncrementalWarmup (the paper's baseline) | 84.07% | +0.72pp | 0.22 |
-| WarmAll | 83.48% | +0.14pp | 0.14 |
-| **Leaper (prefetch phase)** | **86.57%** | **+3.23pp** | **0.73** |
-| Oracle, one interval of foresight | 88.79% | +5.45pp | 0.88 |
+| LRU (stock) | 83.54% | — | — |
+| EagerEvict | 83.81% | +0.27pp | — |
+| IncrementalWarmup (the paper's baseline) | 84.74% | +1.21pp | 0.21 |
+| WarmAll | 83.58% | +0.04pp | 0.12 |
+| WarmFlushOnly | 83.75% | +0.21pp | 0.09 |
+| **Leaper (prefetch phase)** | **86.79%** | **+3.25pp** | **0.72** |
+| Oracle, one interval of foresight | 88.79% | +5.26pp | 0.88 |
 
 **RocksDB, 10 GB of data, 3 GB block cache, 200 s** — the paper's scale, with
 a stable hot set:
 
 | policy | hit ratio | vs stock |
 |---|---|---|
-| stock (`kDisable`) | 90.10% | — |
-| `kFlushOnly` | 91.49% | +1.39pp |
-| `kFlushAndCompaction` | 91.40% | +1.30pp |
-| **Leaper, block-level warming** | **91.65%** | **+1.55pp** |
+| stock (`kDisable`) | 90.11% | — |
+| `kFlushOnly` | 91.51% | +1.40pp |
+| `kFlushAndCompaction` | 91.40% | +1.29pp |
+| **Leaper, block-level warming** | **91.67%** | **+1.56pp** |
 
 Reproduced as the paper's two real workload *shapes* (stationary power laws,
 Table 2 of the paper), the answer depends on which one and on how big the
 table is relative to the cache. The instant-messaging shape over a table
 larger than the cache is where selection wins by the largest margin measured
-on RocksDB, +8.71pp against warming everything's +6.47pp. At that table's own
+on RocksDB, +8.36pp against warming everything's +6.49pp. At that table's own
 8m-row size, where it fits in the cache, warming everything wins instead,
-+19.23pp against +15.48pp, though Leaper holds the lowest tail latency of the
-four policies (p99 31 us against stock's 57 and warm-everything's 106). The
++19.11pp against +15.35pp, though Leaper holds the lowest tail latency of the
+four policies (p99 36 us against warm-everything's 100). The
 read-heavy e-commerce shape leaves nothing to select at all.
 
 ## Layout
