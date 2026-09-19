@@ -20,3 +20,7 @@ target_include_directories(collector_bench PRIVATE src include)
 target_link_libraries(collector_bench PRIVATE leaper_core)
 find_package(Threads REQUIRED)
 target_link_libraries(collector_bench PRIVATE Threads::Threads)
+
+add_executable(core_check src/core_check.cc)
+target_include_directories(core_check PRIVATE src include)
+target_link_libraries(core_check PRIVATE leaper_core)

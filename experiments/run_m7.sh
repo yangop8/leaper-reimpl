@@ -52,7 +52,10 @@ if [ "$STAGE" = "all" ]; then
   echo "=== 2/3 train models + calibrate ==="
   $PY tools/train_leaper.py --trace="$OUT/${TAG}_train" --slot_s=$SLOT \
       --range_size=$RANGE --steps=6 --out="$OUT/${TAG}.model" | tail -12
-  $PY tools/calibrate_phases.py "$OUT/${TAG}_train" --block_kb=4 --cache_mb=128 \
+  # The recovery-time constant beta is divided by the cache size online, so
+  # it has to be calibrated against the same size the run uses; at 128 MB
+  # fixed, a 3 GB run estimated T2 24x too short and used one prediction step.
+  $PY tools/calibrate_phases.py "$OUT/${TAG}_train" --block_kb=4 --cache_mb=${CACHE_MB:-128} \
       | tee "$OUT/${TAG}.calibration.txt"
 fi
 ALPHA=$(grep -o 'leaper_t1_alpha=[0-9.e+-]*' "$OUT/${TAG}.calibration.txt" | cut -d= -f2)

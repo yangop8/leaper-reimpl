@@ -29,8 +29,11 @@ costs, and that quantity depends on every row of that table. **Treat the
 measurements here as evidence about this setup, not as a verdict on the
 paper.**
 
-**Eight defects were found in this harness, two of which invalidated every
-hit ratio measured before them.** Compaction-output warming silently failed
+**Sixteen defects were found in this harness, two of which invalidated every
+hit ratio measured before them, and the last eight of which came from an
+independent code review on 2026-09-19 whose fixes are being re-measured as
+this is written (the numbers below are the pre-review ones until section I of
+the M8 document replaces them).** Compaction-output warming silently failed
 for months of work because a hook fired before the output file was synced, and
 the hit ratio counted the engine's own compaction reads as workload lookups,
 which handed a free 2pp to whichever policy slowed compaction down the most.

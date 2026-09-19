@@ -45,19 +45,18 @@ std::vector<size_t> SelectOverlapping(const std::vector<BlockRef>& blocks,
     return out;
   }
 
-  size_t i = 0, j = 0;
-  while (i < m && j < n) {
-    if (blocks[i].last_range < spans[j].begin) {
-      ++i;
-    } else if (spans[j].end < blocks[i].first_range) {
-      ++j;
-    } else {
-      out.push_back(i);
-      // A block may span several hot ranges; advance whichever ends first,
-      // but never re-add the same block.
-      if (blocks[i].last_range <= spans[j].end) ++i;
-      else ++j;
-    }
+  // Blocks are sorted by first_range but come from several SSTs, so they can
+  // overlap or nest ([0,10] then [1,2]); a classic two-pointer merge that
+  // advances past a block once it has been matched would skip the nested
+  // one. Instead the span cursor only ever moves forward: a span that ends
+  // before this block's first_range also ends before every later block's,
+  // so it can be discarded for good. Each block is then tested against the
+  // first span that could still reach it. O(m + n).
+  size_t j = 0;
+  for (size_t i = 0; i < m; ++i) {
+    while (j < n && spans[j].end < blocks[i].first_range) ++j;
+    if (j == n) break;
+    if (spans[j].begin <= blocks[i].last_range) out.push_back(i);
   }
   return out;
 }

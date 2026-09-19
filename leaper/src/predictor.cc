@@ -85,15 +85,22 @@ void Predictor::PredictHot(const Collector& collector,
   const int n = feature_count();
   std::vector<float> f(n, 0.0f);
   const int last = static_cast<int>(models_.size());
+  if (last == 0) return;
   step_lo = std::max(1, step_lo);
-  step_hi = std::min(last, step_hi);
+  // leaper.h promises that a single model stands in for every step. Clamping
+  // the step range to the model count broke that: a compaction's prefetch
+  // phase starts at step k1+1 >= 2, so with one model it predicted nothing.
+  const bool single = (last == 1);
+  if (single) step_hi = step_lo;
+  else step_hi = std::min(last, step_hi);
   if (step_hi < step_lo) return;
 
   for (RangeId r : candidates) {
     BuildFeatures(collector, r, now_us, f.data());
     bool hot = false;
     for (int s = step_lo; s <= step_hi && !hot; ++s) {
-      if (models_[s - 1].Predict(f.data(), n) >= threshold) hot = true;
+      const GbdtModel& m = single ? models_[0] : models_[s - 1];
+      if (m.Predict(f.data(), n) >= threshold) hot = true;
       if (inferences) ++*inferences;
     }
     if (hot) out->push_back(r);

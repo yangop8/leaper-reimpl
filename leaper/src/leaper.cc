@@ -174,6 +174,16 @@ class LeaperImpl : public Leaper {
                          const std::vector<BlockRef>& input_blocks,
                          uint64_t now_us) override {
     std::lock_guard<std::mutex> lock(mu_);
+    // Background operations nest: LevelDB's DoCompactionWork calls
+    // CompactMemTable() in the middle of a compaction whenever an immutable
+    // memtable is waiting (db_impl.cc, "Prioritize immutable compaction
+    // work"), so a flush's Begin/End arrives inside the compaction's. The
+    // per-job state is therefore a stack: the outer job's prediction, budget
+    // and flush flag are saved here and restored by OnCompactionEnd. Without
+    // this, every flush that landed inside a compaction replaced the
+    // compaction's hot set with the flush's and left the flush flag set, so
+    // the rest of that compaction warmed the wrong blocks or none.
+    ctx_stack_.push_back(JobCtx{hot_t2_, prefetched_bytes_, budget_bytes_, cur_is_flush_});
     hot_t2_.clear();
     prefetched_bytes_ = 0;
     cur_is_flush_ = info.is_flush;
@@ -329,7 +339,20 @@ class LeaperImpl : public Leaper {
 
   void OnCompactionEnd(const CompactionInfo&, uint64_t) override {
     std::lock_guard<std::mutex> lock(mu_);
-    hot_t2_.clear();
+    // Restore the enclosing job, if any. Adapters whose jobs run concurrently
+    // rather than nested (RocksDB) consume the prediction inside Begin and
+    // never read this state after it, so an out-of-order End is harmless
+    // there; adapters whose jobs nest (LevelDB) get their outer state back.
+    if (ctx_stack_.empty()) {
+      hot_t2_.clear();
+      return;
+    }
+    JobCtx outer = std::move(ctx_stack_.back());
+    ctx_stack_.pop_back();
+    hot_t2_ = std::move(outer.hot_t2);
+    prefetched_bytes_ = outer.prefetched_bytes;
+    budget_bytes_ = outer.budget_bytes;
+    cur_is_flush_ = outer.is_flush;
   }
 
   void OnFileObsolete(uint64_t, const std::vector<BlockRef>& blocks) override {
@@ -427,6 +450,12 @@ class LeaperImpl : public Leaper {
   std::vector<RangeSpan> hot_t2_;
   uint64_t prefetched_bytes_ = 0, budget_bytes_ = 0;
   bool cur_is_flush_ = false;
+  struct JobCtx {
+    std::vector<RangeSpan> hot_t2;
+    uint64_t prefetched_bytes, budget_bytes;
+    bool is_flush;
+  };
+  std::vector<JobCtx> ctx_stack_;  // enclosing jobs, innermost last
   Stats stats_;
   std::atomic<double> qps_{0.0};
   bool ssad_suspended_ = false, ssad_last_bad_ = false;

@@ -90,6 +90,11 @@ class Adapter : public leveldb::LeaperHooks {
   std::mutex mu_;
   uint64_t current_output_ = 0;
   std::vector<leaper::BlockRef> pending_warm_;
+  struct NestedJob {
+    std::vector<leaper::BlockRef> pending_warm;
+    uint64_t current_output;
+  };
+  std::vector<NestedJob> nested_;  // enclosing jobs, innermost last
   // File sizes learned from compaction inputs, so an obsolete file can still
   // be opened to enumerate its blocks.
   std::unordered_map<uint64_t, uint64_t> file_sizes_;

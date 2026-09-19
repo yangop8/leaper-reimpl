@@ -87,6 +87,7 @@ class Adapter {
   uint64_t warmed_blocks() const { return warmed_blocks_; }
   uint64_t warm_files() const { return warm_files_; }
   uint64_t warm_open_failed() const { return warm_open_failed_; }
+  uint64_t warm_budget_stops() const { return warm_budget_stops_; }
   void SetDB(rocksdb::DB* db);
   void ResetClock();
 
@@ -121,10 +122,10 @@ class Adapter {
   std::shared_ptr<rocksdb::TableFactory> table_factory_;
   const rocksdb::Comparator* comparator_ = nullptr;
   uint64_t warmed_blocks_ = 0, warm_files_ = 0, warm_open_failed_ = 0;
-  uint64_t warm_blocks_this_job_ = 0, warm_block_budget_ = 0;
+  uint64_t warm_block_budget_ = 0, warm_budget_stops_ = 0;
   void WarmFromFiles(const std::vector<std::string>& outputs,
-                     const std::vector<leaper::BlockRef>& ranges);
-  bool WarmBudgetExhausted();
+                     const std::vector<leaper::BlockRef>& ranges,
+                     uint64_t budget_blocks);
   uint64_t range_size_ = 1;
   uint64_t num_ranges_ = 1024;
 

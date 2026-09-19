@@ -234,11 +234,14 @@ def build_dataset(read_rate, write_rate, precursors, history, slot_s, gamma, ste
     for s in range(history, n_slots - step):
         rh = read_rate[:, s - history:s]                    # (R, history)
         wh = write_rate[:, s - history:s]
-        # Prediction time on the *plug-in's* clock. The trace starts at the
-        # measurement window but the online clock starts at the run, so the
-        # timestamp features were offset by the warmup (30 s) between training
-        # and inference until the trace meta began recording the offset.
-        t = (s + 1) * slot_s + clock_offset_s
+        # Prediction time on the *plug-in's* clock. Online, Collector::History
+        # at a time inside slot s returns slots s-history..s-1 and step 1 is
+        # slot s itself -- the same rows as here -- and the timestamp features
+        # are built from that time, i.e. slot s. (An earlier version stamped
+        # these rows with slot s+1, one slot ahead of what inference sees.)
+        # The trace starts at the measurement window but the online clock
+        # starts at the run, so the warmup is added back via clock_offset_s.
+        t = s * slot_s + clock_offset_s
         stamp = np.tile(
             np.array([(t // 3600) % 24, (t // 60) % 60, t % 60], dtype=np.float32),
             (n_ranges, 1))

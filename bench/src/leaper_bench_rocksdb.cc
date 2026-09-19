@@ -86,6 +86,7 @@ struct Flags {
   double leaper_threshold = 0.5;
   int warm_scan_keys = 4096;
   std::string warm_mode = "iterator";   // or "sst": block-level warming of the job's output files
+  double leaper_max_prefetch_frac = 1.0;  // per-job warm budget as a fraction of the block cache
   // LSM geometry. RocksDB's defaults (L1 = 256 MB, x10 per level) give a
   // 480 MB database five compactions in five minutes; LevelDB's hard-coded
   // L1 = 10 MB gives the same database ~250. Set level_base_mb=10 to compare
@@ -180,6 +181,7 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "leaper_threshold", &v)) flags.leaper_threshold = ParseDouble("leaper_threshold", v);
     else if (ParseFlag(a, "warm_scan_keys", &v)) flags.warm_scan_keys = ParseInt("warm_scan_keys", v);
     else if (ParseFlag(a, "warm_mode", &v)) flags.warm_mode = v;
+    else if (ParseFlag(a, "leaper_max_prefetch_frac", &v)) flags.leaper_max_prefetch_frac = ParseDouble("leaper_max_prefetch_frac", v);
     else if (ParseFlag(a, "level_base_mb", &v)) flags.level_base_mb = ParseInt("level_base_mb", v);
     else if (ParseFlag(a, "l0_trigger", &v)) flags.l0_trigger = ParseInt("l0_trigger", v);
     else if (ParseFlag(a, "dynamic_level_bytes", &v)) flags.dynamic_level_bytes = ParseInt("dynamic_level_bytes", v);
@@ -347,6 +349,7 @@ int Run() {
     ao.core.t1_alpha = flags.leaper_t1_alpha;
     ao.core.t2_beta = flags.leaper_t2_beta;
     ao.core.cache_bytes = static_cast<double>(flags.cache_mb) * 1024 * 1024;
+    ao.core.max_prefetch_frac = flags.leaper_max_prefetch_frac;
     ao.core.precursor_path = flags.precursors;
     ao.num_ranges = flags.num / flags.leaper_range_size + 1;
     ao.warm_scan_keys = flags.warm_scan_keys;
@@ -446,10 +449,13 @@ int Run() {
       shared.trace.push_back(new TraceWriter(path));
     }
     std::FILE* meta = std::fopen((flags.trace_out + ".meta").c_str(), "w");
+    // clock_offset_s: the trace's timestamps start at the measurement window
+    // but the plug-in's clock starts at the run, so the trainer must shift
+    // its timestamp features by the warmup or they are 30 s off online.
     std::fprintf(meta, "engine=rocksdb\nnum_keys=%" PRIu64 "\nlife_range_size=%" PRIu64
-                 "\nlife_chain=%d\nseed=%" PRIu64 "\nthreads=%d\n",
+                 "\nlife_chain=%d\nseed=%" PRIu64 "\nthreads=%d\nclock_offset_s=%d\n",
                  flags.num, flags.life_range_size, flags.life_chain, flags.seed,
-                 flags.threads);
+                 flags.threads, flags.warmup);
     std::fclose(meta);
   }
 
@@ -566,12 +572,12 @@ int Run() {
         "[leaper] reads_seen=%" PRIu64 " inferences=%" PRIu64 " (%.2f us/inf) "
         "hot=%" PRIu64 " warmed_ranges=%" PRIu64 " warm_us=%" PRIu64
         " warm_mode=%s warmed_blocks=%" PRIu64 " warm_files=%" PRIu64
-        " warm_open_failed=%" PRIu64 "\n",
+        " warm_open_failed=%" PRIu64 " warm_budget_stops=%" PRIu64 "\n",
         ls.reads_seen, ls.inferences,
         ls.inferences ? static_cast<double>(ls.inference_us) / ls.inferences : 0.0,
         ls.ranges_predicted_hot, adapter->warmed_ranges(), adapter->warm_us(),
         flags.warm_mode.c_str(), adapter->warmed_blocks(), adapter->warm_files(),
-        adapter->warm_open_failed());
+        adapter->warm_open_failed(), adapter->warm_budget_stops());
   }
   for (auto* h : shared.read_hist) delete h;
   for (auto* h : shared.write_hist) delete h;

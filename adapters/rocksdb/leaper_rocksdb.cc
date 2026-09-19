@@ -53,13 +53,6 @@ class Adapter::CacheBridge : public leaper::CacheOps {
 
   void Prefetch(const leaper::BlockRef& b) override {
     if (a_->db_ == nullptr) return;
-    // The core's byte budget cannot see this warm: the candidates the RocksDB
-    // adapter builds are whole key ranges with size 0, so ShouldPrefetch's
-    // budget check never fires. Count the blocks this scan actually pulls in
-    // and stop the job's warming once it has read a cache's worth. Without
-    // this the iterator mode is unbounded: on a 25,000-range workload one run
-    // spent 3,350 seconds of background time warming during a 200 s test.
-    if (a_->WarmBudgetExhausted()) return;
     const uint64_t t0 = MonotonicUs();
     const uint64_t blocks0 = DataBlocksRead();
     rocksdb::ReadOptions ro;
@@ -79,7 +72,6 @@ class Adapter::CacheBridge : public leaper::CacheOps {
     const uint64_t read = DataBlocksRead() - blocks0;
     std::lock_guard<std::mutex> lock(a_->mu_);
     a_->warm_us_ += MonotonicUs() - t0;
-    a_->warm_blocks_this_job_ += read;
     a_->warmed_blocks_ += read;
     ++a_->warmed_;
   }
@@ -158,7 +150,6 @@ void Adapter::Listener::Begin(int job_id, int level, bool is_flush, uint64_t,
     if (a_->core_->ShouldPrefetch(b, a_->NowUs())) chosen.push_back(b);
   }
   a_->pending_by_job_[job_id] = std::move(chosen);
-  a_->warm_blocks_this_job_ = 0;
 }
 
 void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs) {
@@ -172,21 +163,33 @@ void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs)
     }
   }
   // The new files are installed and readable; warming now lands on them.
+  //
+  // The core's byte budget cannot see these warms: the candidates this
+  // adapter builds are whole key ranges with size 0, so ShouldPrefetch's
+  // check never fires. The budget is enforced here instead, per job and
+  // while the reads happen, by counting the data blocks this thread's
+  // PerfContext says each warm pulled in. Without it the iterator mode was
+  // unbounded (3,350 s of background warming in one 200 s run), and a check
+  // made only before the first read let the sst mode read a whole file's
+  // worth past a budget of one block.
+  const uint64_t budget = a_->warm_block_budget_;  // 0 = unlimited
   if (a_->warm_mode_ == "sst" && a_->table_factory_ != nullptr) {
-    a_->WarmFromFiles(outputs, chosen);
+    a_->WarmFromFiles(outputs, chosen, budget);
   } else {
-    for (const leaper::BlockRef& b : chosen) a_->bridge_->Prefetch(b);
+    uint64_t used = 0;
+    for (const leaper::BlockRef& b : chosen) {
+      if (budget != 0 && used >= budget) {
+        std::lock_guard<std::mutex> lock(a_->mu_);
+        ++a_->warm_budget_stops_;
+        break;
+      }
+      const uint64_t before = CacheBridge::DataBlocksRead();
+      a_->bridge_->Prefetch(b);
+      used += CacheBridge::DataBlocksRead() - before;
+    }
   }
   leaper::CompactionInfo info;
   a_->core_->OnCompactionEnd(info, a_->NowUs());
-}
-
-// A job may warm at most |max_prefetch_frac| of the block cache. The counter
-// is reset at each job's Begin.
-bool Adapter::WarmBudgetExhausted() {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (warm_block_budget_ == 0) return false;
-  return warm_blocks_this_job_ >= warm_block_budget_;
 }
 
 void Adapter::SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
@@ -201,17 +204,23 @@ void Adapter::SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
 // finished the job, so its reads are not the workload's (the harness counts
 // them under bg_lookups) and its cost is charged where the LevelDB hook's is.
 void Adapter::WarmFromFiles(const std::vector<std::string>& outputs,
-                            const std::vector<leaper::BlockRef>& ranges) {
+                            const std::vector<leaper::BlockRef>& ranges,
+                            uint64_t budget_blocks) {
   if (ranges.empty() || outputs.empty()) return;
-  if (WarmBudgetExhausted()) return;
   const uint64_t t0 = MonotonicUs();
   rocksdb::Options o;
   o.table_factory = table_factory_;
   o.comparator = comparator_ != nullptr ? comparator_ : rocksdb::BytewiseComparator();
   rocksdb::SetPerfLevel(rocksdb::PerfLevel::kEnableCount);
   rocksdb::get_perf_context()->Reset();
-  uint64_t blocks = 0, files = 0, failed = 0;
+  auto blocks_so_far = [] {
+    const rocksdb::PerfContext* pc = rocksdb::get_perf_context();
+    return pc->block_read_count - pc->index_block_read_count -
+           pc->filter_block_read_count - pc->compression_dict_block_read_count;
+  };
+  uint64_t blocks = 0, files = 0, failed = 0, stops = 0;
   for (const std::string& path : outputs) {
+    if (budget_blocks != 0 && blocks_so_far() >= budget_blocks) { ++stops; break; }
     rocksdb::SstFileReader reader(o);
     if (!reader.Open(path).ok()) {
       ++failed;
@@ -223,23 +232,25 @@ void Adapter::WarmFromFiles(const std::vector<std::string>& outputs,
     ro.verify_checksums = false;
     std::unique_ptr<rocksdb::Iterator> it(reader.NewIterator(ro));
     for (const leaper::BlockRef& b : ranges) {
+      if (budget_blocks != 0 && blocks_so_far() >= budget_blocks) { ++stops; break; }
       const std::string start = mapper_->RangeStartKey(b.first_range);
       const std::string limit = mapper_->RangeStartKey(b.last_range + 1);
       for (it->Seek(rocksdb::Slice(start));
            it->Valid() && o.comparator->Compare(it->key(), rocksdb::Slice(limit)) < 0;
            it->Next()) {
         // Reading is the point: each new block the iterator enters is one
-        // fill_cache insert under the key the DB's reader will use.
+        // fill_cache insert under the key the DB's reader will use. The
+        // budget is re-checked per range rather than per key: one range of
+        // the benchmark's keys is at most a few hundred blocks.
       }
     }
   }
-  const rocksdb::PerfContext* pc = rocksdb::get_perf_context();
-  blocks = pc->block_read_count - pc->index_block_read_count - pc->filter_block_read_count;
+  blocks = blocks_so_far();
   std::lock_guard<std::mutex> lock(mu_);
   warm_us_ += MonotonicUs() - t0;
   warmed_ += ranges.size();
-  warm_blocks_this_job_ += blocks;
   warmed_blocks_ += blocks;
+  warm_budget_stops_ += stops;
   warm_files_ += files;
   warm_open_failed_ += failed;
 }

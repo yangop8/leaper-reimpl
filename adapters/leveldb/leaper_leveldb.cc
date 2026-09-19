@@ -152,7 +152,12 @@ void Adapter::OnCompactionBegin(
       if (r.last_range < r.first_range) std::swap(r.first_range, r.last_range);
       blocks.push_back(r);
     }
+    // A flush can begin while a compaction is between output files (see the
+    // core's OnCompactionBegin); keep the compaction's decisions and current
+    // output aside and restore them when the flush ends.
+    nested_.push_back(NestedJob{std::move(pending_warm_), current_output_});
     pending_warm_.clear();
+    current_output_ = 0;
   }
   // |C ∩ M_i|: how much of the cache this compaction is about to invalidate.
   // Counted before the core acts so phase-1 evictions are not mistaken for
@@ -225,6 +230,11 @@ void Adapter::OnOutputFileFinished(uint64_t file_number, uint64_t file_size) {
 void Adapter::OnCompactionEnd() {
   leaper::CompactionInfo info;
   core_->OnCompactionEnd(info, NowUs());
+  std::lock_guard<std::mutex> lock(mu_);
+  if (nested_.empty()) return;
+  pending_warm_ = std::move(nested_.back().pending_warm);
+  current_output_ = nested_.back().current_output;
+  nested_.pop_back();
 }
 
 void Adapter::OnFileObsolete(uint64_t file_number, uint64_t file_size) {

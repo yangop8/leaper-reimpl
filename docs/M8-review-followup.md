@@ -1079,3 +1079,40 @@ answer: the learned part of Leaper earns its keep exactly where a large
 fraction of key ranges are cold at any moment and the cache cannot hold
 everything, and it degenerates gracefully to "warm everything" where that is
 not true.
+
+## The 2026-09-19 code review: eight more defects (nine to sixteen)
+
+An independent review of commit `90fadc4`
+([`docs/code-review-2026-09-19.md`](code-review-2026-09-19.md)) found seven
+defects, each with a minimal reproduction, and reading the patch file while
+fixing them turned up an eighth. All are fixed in the commit that adds this
+section; `leaper/src/core_check.cc` pins the four that live in the core.
+
+| # | defect | where | what it did to the measurements |
+|---|---|---|---|
+| 9 | **A flush that begins inside a compaction replaced the compaction's state.** LevelDB's `DoCompactionWork` calls `CompactMemTable()` mid-compaction whenever an immutable memtable is waiting, so a flush's Begin/End nests inside the compaction's. The core kept one hot set, one budget and one flush flag; the adapter one pending list and one current output file. The inner flush overwrote them and its End cleared them. | `leaper.cc`, `leaper_leveldb.cc` | For the rest of that compaction the learned policy warmed nothing (its hot set was gone), `WarmFlush` warmed compaction outputs (the flag stayed set), and every warming policy lost the blocks it had already decided to warm in the current output file. LevelDB's single background thread spends most of its time in compaction, so nearly every flush nested: 5 of 59 compactions on the slow-storage runs, 22 of 261 on NVMe. Fix: a per-job context stack in both places. |
+| 10 | **The learned policy never warmed a flush output on LevelDB.** A flush has no input SSTs; the core built its candidate ranges from the input blocks, so a flush had none and predicted nothing. | `db_impl.cc`, `leaper.cc` | Leaper on LevelDB was compaction-only, against a `WarmFlush` baseline that warms exactly what Leaper was not allowed to. Fix: the engine reports the memtable's key span as one pseudo-block, and the core predicts over it. |
+| 11 | **The sort-merge overlap check skipped nested blocks.** Input blocks from different SSTs can overlap or nest; the two-pointer merge advanced past a block once matched, so `[0,10]` followed by `[1,2]` never examined the second. | `overlap.cc` | A hot block could be evicted in phase 1. Only "Leaper (both phases)" rows are affected. Fix: the span cursor only moves forward and every block is tested. Randomised cross-check against the binary-search path in `core_check`. |
+| 12 | **The RocksDB warm budget (defect 8's fix) checked once, before reading.** `WarmFromFiles` tested the budget at entry and charged the blocks after reading every file and range; the counter was also shared by concurrent jobs and reset by any job's Begin. | `leaper_rocksdb.cc` | A budget of one block let a job read 345 (the review's test). The committed runs never came near their budgets (786k blocks per job at 3 GB), so no result changed. Fix: per-End budget, checked per range while reading. Verified: 36 blocks over 21 stops where the unbounded run read 16,633. |
+| 13 | **RocksDB calibration was hard-wired to a 128 MB cache.** `run_m7.sh` passed `--cache_mb=128` to `calibrate_phases.py` regardless of `CACHE_MB`; the constant it produces is divided by the real cache size online. | `run_m7.sh` | On the 3 GB runs the recovery window T2 was estimated 24x too short and rounded to one prediction step, so the multi-step models beyond step 1 were never consulted: H17 and all of H18. Fix: calibrate with `CACHE_MB`. |
+| 14 | **Training stamped each row with the slot after the one inference sees, and RocksDB traces carried no clock offset.** The trainer used history `s-6..s-1`, label slot `s`, and timestamp `s+1`; online, `Collector::History` at a time inside slot `s` returns the same history and the timestamp is `s`. The RocksDB harness never wrote `clock_offset_s`, so its timestamps were also 30 s (the warmup) off. | `train_leaper.py`, `leaper_bench_rocksdb.cc` | Every model's three timestamp features were misaligned by one slot on LevelDB and by 31 slots on RocksDB. The lifecycle workload's schedule depends on the seed, which differs between training and evaluation, so those features cannot carry transferable signal there; the effect on the lifecycle results should be small, but it is not zero and it is not measured. Fix: stamp with `s`; write the offset. All models are retrained. |
+| 15 | **A single model did not stand in for every step, as `leaper.h` promises.** `PredictHot` clamped the step range to the model count, and a compaction's prefetch phase starts at step k1+1 ≥ 2. | `predictor.cc` | With one model a compaction predicted nothing. No committed run used one model (the scripts pass six). Fix: one model is used for all steps. |
+| 16 | **The LevelDB patch did not contain the hook header.** `leveldb-1.23-leaper-hooks.patch` was generated with `git diff`, which omits the untracked `include/leveldb/leaper_hooks.h`; it built here only because the file was present in the working tree. | `adapters/leveldb/` | A fresh clone could not build. Fix: regenerated with the file added; verified to apply to pristine 1.23. |
+
+**What this does to section H.** Defects 9, 10 and 14 touch every LevelDB
+row for a policy that warms — WarmAll, WarmFlush, IncrementalWarmup, Leaper,
+Oracle — and defect 11 the "both phases" rows; stock and EagerEvict are
+unchanged. Defects 13 and 14 touch every RocksDB Leaper row in H17 and H18;
+the RocksDB built-in policies do not go through the adapter and are
+unchanged. The direction of the LevelDB changes is knowable: 9 and 10 both
+withheld warming from Leaper that the naive baselines were doing, so Leaper's
+LevelDB figures were, if anything, understated relative to WarmFlush and
+WarmAll. The size is not knowable without measuring.
+
+**Re-measurement (`_v4` tags, models retrained).** The three LevelDB
+configurations the README quotes and the three RocksDB configurations that
+carried a conclusion: H1 (slow storage, 64 MB), H2 (NVMe, 128 MB), H14 (slow,
+128 MB, 40 s lifetimes), H17 (paper scale, lifecycle), H18-A (IM shape on a
+10 GB table) and H18-C (IM at its own size). The remaining configurations —
+the rest of H10, H4-H6, H11, H18-B and H18-D — stand as measured before these
+fixes and are marked so where they are quoted. Results follow in section I.
