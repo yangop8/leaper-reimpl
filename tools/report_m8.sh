@@ -142,3 +142,9 @@ for T in m4_slow_v4 m4_nvme_v4 m4_slow128_life40_v4; do echo "-- $T"; $PY tools/
 for T in m7paper3_v4 m7zipf09_v4 m7fit_im_v4; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,7p'; done
 sec "I' RocksDB after the 2026-09-20 follow-up (End under the adapter lock), _v5"
 for T in m7paper3_v5 m7zipf09_v5 m7fit_im_v5; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,7p'; done
+echo; echo "=============== M9: journal prep ==============="
+sec "M9.1 Leaper through RocksDB's patched prepopulate path (_v6) next to the _v5 rows"
+for T in m7paper3 m7zipf09 m7fit_im; do echo "-- $T"; $PY tools/summarize_matrix.py $OUT ${T}_v5 2>/dev/null | grep -v missing | sed -n '3,7p'; f=$OUT/${T}_v6_prepop_leaper.timeseries.csv; [ -f "$f" ] && awk -F, 'NR>1{h+=$6;l+=$5} END{printf "%-22s %8.2f%%  (prepopulate, _v6)\n", "Leaper (prepopulate)", 100*h/l}' "$f"; done
+sec "M9.2 FAST'20 ZippyDB model (mixgraph): RocksDB m7zippy, LevelDB m4zippy"
+$PY tools/summarize_matrix.py $OUT m7zippy 2>/dev/null | grep -v missing | sed -n '3,8p'
+$PY tools/summarize_matrix.py $OUT m4zippy 2>/dev/null | grep -v missing | sed -n '3,9p'

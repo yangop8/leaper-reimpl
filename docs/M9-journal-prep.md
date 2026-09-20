@@ -121,7 +121,81 @@ per second rather than ZippyDB's 4,900, so that 300 s of run carry about an
 hour of ZippyDB's writes; a 4 MB write buffer keeps flushes and compactions
 frequent enough to matter in that window.
 
-ZIPPY_TABLE
+**RocksDB** (`m7zippy`; 647 MB of compaction and 104 MB of flushes in the
+300 s window; model over 25,000 ranges: positive rate 0.293, precision 0.872,
+recall 0.264, AUC 0.764 against the naive rule's 0.657):
+
+| policy | hit ratio | vs stock | blocks warmed |
+|---|---|---|---|
+| stock | 81.15% | — | — |
+| `kFlushOnly` | 81.31% | +0.16pp | |
+| `kFlushAndCompaction` | **82.03%** | **+0.88pp** | all |
+| Leaper, sst re-read | 81.94% | +0.79pp | 159k |
+| Leaper, prepopulate | 82.00% | +0.85pp | 172k |
+
+On the FAST'20 model every warming policy that touches compaction output is
+worth about +0.9pp, and selection neither adds nor costs anything: Leaper
+and `kFlushAndCompaction` are within RocksDB's noise of each other. The
+regime map says why. The hot key range is about 100 MB of a 3 GB database
+and the block cache is 256 MB, so the cache holds the working set with room
+to spare; that is the corner in which recall beats precision, and here the
+model's recall is 0.26 — inside the one hot range the keys are a hashed
+power law, so which 2,000-key slice of it is read in a given second is close
+to a coin toss, and the model can only be precise about the few slices that
+are hot every second. What it declines to warm (it admits 172k blocks where
+warming everything admits every output block) would have been read from a
+cache that had space for it. The paper's own Table 2 puts ZippyDB's
+counterpart, the e-commerce workload, at zipf 0.3 with a 6:1 read/write
+ratio: the same read-heavy, cache-fits shape, and the same verdict as H18-D.
+
+**LevelDB** (`m4zippy`, same model, same scale and rate): the engine is
+outside its envelope here — 108 MB of user writes became **78 GB** of
+compaction output in 300 s (2,149 compactions), a write amplification near
+700 from a 10 MB L1 under a 3 GB database, and the single background thread
+ran at capacity throughout.
+
+| policy | hit ratio | vs LRU | QPS | compactions in window |
+|---|---|---|---|---|
+| LRU | 73.56% | — | 60,194 | 1,783 |
+| EagerEvict | 74.26% | +0.70pp | 60,150 | 1,739 |
+| IncrementalWarmup | 72.02% | -1.53pp | 60,253 | 1,628 |
+| WarmAll | 65.38% | -8.18pp | 60,225 | 1,606 |
+| WarmFlushOnly | 74.44% | +0.89pp | 60,147 | 1,743 |
+| Leaper (prefetch only) | 84.61% | +11.05pp | **65,993** | **671** |
+| Leaper, warm reads on a separate thread | 84.59% | +11.03pp | 65,765 | 664 |
+
+**The +11pp is not prefetching, and it took two more runs to see why.**
+The Leaper row is the only one whose QPS exceeds the harness's rate budget
+and whose compaction count is a third of everyone else's. Moving the warm
+reads off the compaction thread (H11's `--warm_async`) changed nothing, so
+the reads were not what was slowing compaction. The run's own statistics
+were: 44.0M inferences at 4.95 us each — **217.6 s of the 300 s run**, on
+LevelDB's one background thread. The model was predicting over 25,000
+ranges, and every flush and every L0 compaction has inputs spanning the
+whole key space, so each of them asked for 25,000 ranges times k1 + k2
+steps. With 72% of the compaction thread's time spent in inference, the
+engine completed 671 compactions instead of 1,783, invalidated a third as
+much cache, and the hit ratio rose for a reason that has nothing to do with
+what was warmed; meanwhile writes stalled behind the compaction backlog and
+were repaid in bursts (78,936 ops in one second against a 60,000 budget),
+which is the QPS excess. RocksDB paid the same inference (51M at 3.5 us,
+180 s) but has two background threads and a hundredth of the compaction
+work, so there it did not bind.
+
+Two lessons for the write-up and one for the design. Any policy's cost on
+the background thread is a confound on a compaction-bound engine, because
+slowing compaction reduces invalidation — a hit-ratio gain that is really a
+write-stall loss, and the sort of thing that only the compaction count and
+the QPS column expose. The paper's Table 5 inference figure (1-5 ms per
+compaction) assumes a few hundred candidate ranges; at 25,000 it is 300 ms
+per job, and on an engine whose flushes span the whole key space that is
+the wrong place to run it. The design consequence is that at fine
+granularity inference must come off the compaction thread — predict
+asynchronously at Begin and let the builder consult a ready answer — or
+the candidate set must be bounded to what the job's output can actually
+contain.
+
+CTL_TABLE
 
 ## 3. Where this leaves the claims
 

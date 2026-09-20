@@ -821,6 +821,14 @@ int Run() {
         adapter->warmed_blocks(), adapter->warm_us(), adapter->warm_failed(),
         adapter->evict_failed(), ls.invalidated_blocks, ls.compactions_seen,
         ls.ssad_suspensions);
+    if (ls.inference_us > 0.2 * 1e6 * static_cast<double>(flags.duration + flags.warmup)) {
+      std::fprintf(stderr,
+          "[leaper] WARNING: inference took %.0f s of a %d s run on the engine's background "
+          "thread; on a compaction-bound engine this throttles compaction and inflates the hit "
+          "ratio (fewer invalidations). Reduce the candidate set (coarser ranges) before "
+          "reading the hit ratio as a prefetching result.\n",
+          ls.inference_us / 1e6, flags.duration + flags.warmup);
+    }
     if (adapter->warm_failed() > 0) {
       std::fprintf(stderr, "[leaper] WARNING: %" PRIu64 " of %" PRIu64
                    " warm calls failed to open the table; prefetch results are invalid\n",

@@ -617,6 +617,14 @@ int Run() {
         flags.warm_mode.c_str(), adapter->warmed_blocks(), adapter->warm_files(),
         adapter->warm_open_failed(), adapter->warm_budget_stops(),
         adapter->prepop_rejected());
+    if (ls.inference_us > 0.2 * 1e6 * static_cast<double>(flags.duration + flags.warmup)) {
+      std::fprintf(stderr,
+          "[leaper] WARNING: inference took %.0f s of a %d s run on background threads; "
+          "if compaction is the bottleneck this throttles it and inflates the hit ratio. "
+          "Check the compaction volume against the other policies before reading the "
+          "hit ratio as a prefetching result.\n",
+          ls.inference_us / 1e6, flags.duration + flags.warmup);
+    }
   }
   for (auto* h : shared.read_hist) delete h;
   for (auto* h : shared.write_hist) delete h;
