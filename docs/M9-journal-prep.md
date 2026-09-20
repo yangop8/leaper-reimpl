@@ -89,8 +89,11 @@ with the paper's Prefix_dist parameters: the key space is cut into 30 key
 ranges whose access probability follows a two-term exponential
 (a = 14.18, b = -2.917, c = 0.0164, d = -0.08082), the key inside a range
 follows a power law (a' = 0.002312, b' = 0.3467) over a seed that is hashed
-to an offset, and the query rate follows a sine wave of period 86 s
-(`--sine_a/b/d`). The port follows `db_bench`'s `GenerateTwoTermExpKeys` step
+to an offset, and the query rate follows a sine wave (`--sine_a/b/d`) whose
+period at the paper's parameters is 86,069 s, the diurnal cycle — flat to
+0.5% over a 300 s run, and flat in every run here (the harness's first
+scaling of it had a period of 0.086 s, which averaged out inside each
+one-second row; the units now match `db_bench`'s). The port follows `db_bench`'s `GenerateTwoTermExpKeys` step
 for step, with a different seed hash, so key identities differ from
 `db_bench`'s and the distribution's shape does not.
 
@@ -164,39 +167,166 @@ ran at capacity throughout.
 | Leaper (prefetch only) | 84.61% | +11.05pp | **65,993** | **671** |
 | Leaper, warm reads on a separate thread | 84.59% | +11.03pp | 65,765 | 664 |
 
-**The +11pp is not prefetching, and it took two more runs to see why.**
-The Leaper row is the only one whose QPS exceeds the harness's rate budget
-and whose compaction count is a third of everyone else's. Moving the warm
-reads off the compaction thread (H11's `--warm_async`) changed nothing, so
-the reads were not what was slowing compaction. The run's own statistics
-were: 44.0M inferences at 4.95 us each — **217.6 s of the 300 s run**, on
-LevelDB's one background thread. The model was predicting over 25,000
-ranges, and every flush and every L0 compaction has inputs spanning the
-whole key space, so each of them asked for 25,000 ranges times k1 + k2
-steps. With 72% of the compaction thread's time spent in inference, the
-engine completed 671 compactions instead of 1,783, invalidated a third as
-much cache, and the hit ratio rose for a reason that has nothing to do with
-what was warmed; meanwhile writes stalled behind the compaction backlog and
-were repaid in bursts (78,936 ops in one second against a 60,000 budget),
-which is the QPS excess. RocksDB paid the same inference (51M at 3.5 us,
-180 s) but has two background threads and a hundredth of the compaction
-work, so there it did not bind.
+**Where the +11pp comes from took four more runs to settle, and the first
+answer written here was wrong.** The Leaper row is the only one whose QPS
+exceeds the harness's rate budget and whose compaction count is a third of
+everyone else's, and the run's own statistics said why the thread was busy:
+44.0M inferences at 4.95 us each, **217.6 s of the 300 s run**, on LevelDB's
+one background thread. The model predicts over 25,000 ranges, and every
+flush and every L0 compaction has inputs spanning the whole key space, so
+each of them asked for 25,000 ranges times k1 + k2 steps. The obvious
+reading — 72% of the compaction thread spent in inference throttled
+compaction, a third as much cache was invalidated, and the hit ratio rose
+for a reason that has nothing to do with what was warmed — is what the
+previous revision of this document and commit 9e2c816 said. The controls
+say otherwise:
 
-Two lessons for the write-up and one for the design. Any policy's cost on
-the background thread is a confound on a compaction-bound engine, because
-slowing compaction reduces invalidation — a hit-ratio gain that is really a
-write-stall loss, and the sort of thing that only the compaction count and
-the QPS column expose. The paper's Table 5 inference figure (1-5 ms per
-compaction) assumes a few hundred candidate ranges; at 25,000 it is 300 ms
-per job, and on an engine whose flushes span the whole key space that is
-the wrong place to run it. The design consequence is that at fine
-granularity inference must come off the compaction thread — predict
-asynchronously at Begin and let the builder consult a ready answer — or
-the candidate set must be bounded to what the job's output can actually
-contain.
+| control | what changed | hit ratio | vs LRU | QPS | compactions | inference |
+|---|---|---|---|---|---|---|
+| Leaper (prefetch only), as above | — | 84.61% | +11.05pp | 65,993 | 671 | 217.6 s |
+| warm reads on a separate thread | `--warm_async` | 84.59% | +11.03pp | 65,765 | 664 | 210.7 s |
+| C1: one prediction step | `--model_steps=1` | 84.88% | +11.32pp | 62,175 | 984 | 145.1 s |
+| C2: 100,000-key ranges (500 of them), retrained | `RANGE_SIZE=100000` | 65.72% | -7.83pp | 60,228 | 1,587 | 0.7 s |
+| **D: dry run — same inference, predictions discarded** | `--leaper_dry_run=1` | **74.53%** | **+0.97pp** | 65,578 | 668 | 218.9 s |
 
-CTL_TABLE
+The dry run is the decisive one. It pays the same inference on the same
+thread (44.3M inferences, 219 s), throttles compaction to the same degree
+(668 against 671), and warms nothing — and it lands at +0.97pp, of which
++0.70pp is the dead-block floor every warming policy shares. **Throttling
+compaction is worth about +0.3pp here; the other ten points of Leaper's
+margin are the prefetching.** C1 agrees from the other side: a third less
+inference and 47% more compactions leave the hit ratio where it was. C2 is
+not a control at all, in hindsight: at 100,000-key ranges the positive rate
+is 0.997, the model predicts everything hot, and Leaper becomes WarmAll
+(-7.83pp against WarmAll's -8.18pp, 1,587 compactions against 1,606); it
+removes the inference and the selection together.
+
+So this is the paper's regime, on the paper's chosen workload model, on the
+engine that rewrites 700 times its ingest: a 256 MB cache that holds the hot
+range with room to spare, compaction that invalidates every hot block many
+times a minute, and a selection that warms 2.7M blocks in the window, 66% of
+them read at least once, where warming everything warms 15.7M at 8% and
+thrashes the cache. Warming the 29% of ranges that will be read restores
+what compaction destroyed; warming all of it evicts the working set to make
+room. The margin over the best non-learned policy (WarmFlushOnly, +0.89pp)
+is ten points, the largest measured anywhere in this repository, and the
+first result here where the learned selection beats every heuristic by far
+more than the noise floor on a workload model that is not this repository's
+own.
+
+**The QPS excess was the harness, not the engine.** Every Leaper and dry-run
+row runs at 65-66k operations per second against a 60k budget, and the rate
+limiter cannot leak: it is one global counter against `op_rate x elapsed`.
+What drifted was the monitor thread, whose per-second loop was "take the
+stats, then sleep one second"; taking the stats means `Leaper::stats()`,
+which takes the core's mutex, which a prediction holds for up to 250 ms at
+a time, 72% of the time. Each row stretched by the wait, 300 rows spanned
+about 325 s of wall clock, and the QPS column read the extra 25 s of budget
+as a 10% overshoot (LevelDB's own LOG clock confirms it: the Leaper run's
+330 monitor iterations took 351 s, stock's 324 s). That is the seventeenth
+defect. Hit ratios are ratios and are unaffected; the compaction column for
+Leaper rows counts a ~325 s window, which understates the throttling
+slightly (671 in 325 s is about 620 in 300); the RocksDB harness did not
+drift (all `m7zippy` rows within 0.1% of 60k) because its monitor reads the
+core's statistics only at the end of the run. Both monitors now sleep to
+the tick rather than for a second.
+
+**And the inference cost is real, so it is now removed rather than
+excused.** Every feature of a range — the completed slots' rates, the
+precursors' rates, the hour, minute and second — is constant within a
+wall-clock second, so the ten jobs LevelDB starts in a typical second on
+this model were making the same 25,000 predictions ten times over. The core
+now memoises predictions per (second, slot, step range)
+(`Options::memoize_predictions`, on by default, pinned by `core_check`), and
+the same configuration re-measured with the memo and the tick-aligned
+monitor gives:
+
+| policy, v9 harness (tick-aligned monitor, memoised predictions) | hit ratio | vs LRU | QPS | compactions | inference | memo hits |
+|---|---|---|---|---|---|---|
+| LRU (stock) | 73.53% | — | 59,998 | 1,756 | — | — |
+| **Leaper (prefetch only)** | **84.86%** | **+11.32pp** | 59,999 | 1,066 | 109.7 s (21.8M inferences) | 19.3M |
+
+Stock reproduces to 0.03pp, and both rows now sit on the 60k budget to the
+operation (each window's operations sum to exactly 300 s of budget: the
+drift is gone). The memo answers 47% of prediction requests — not the 90%
+the job rate suggested, because k1 varies with each compaction's size and
+a job with a different step range is a different memo — so inference falls
+from 218 s to 110 s, compactions recover from 671 to 1,066 against stock's
+1,756, and the hit ratio does not move: +11.32pp, with 3.0M blocks warmed
+in the window at a measured prefetch precision of 0.57. The dry run said
+the throttling was worth a third of a point; halving the throttling moved
+the result by a quarter of one, in the direction the dry run predicts. The
+remaining third of the thread is the model's own cost at this granularity.
+Taking it off the compaction thread entirely, or bounding the candidates to
+what a job's output can contain, is the design work left — and it is now
+separable from the result.
+
+Two lessons for the write-up. A policy's cost on the background thread is a
+confound on a compaction-bound engine, and the compaction count and the QPS
+column are what expose it; but the way to size the confound is a dry run
+that pays the cost and discards the answer, not a coarser model that removes
+the cost and the selection together. And the paper's Table 5 inference
+figure (1-5 ms per compaction) assumes a few hundred candidate ranges; at
+25,000 it is 300 ms per job, which on an engine whose flushes span the whole
+key space is one second's worth of prediction repeated for every job in that
+second, and memoising it is the fix.
 
 ## 3. Where this leaves the claims
 
-TO_FILL
+Of the five items listed as necessary before a journal write-up, two are
+done and one changed shape on the way.
+
+**Selective prepopulate (item 3) is settled and closes M8's largest open
+question.** Leaper through RocksDB's own warming path is within 0.2pp of
+Leaper through the re-read path on all three configurations, so none of the
+RocksDB margins reported in section H were cost artefacts: the +2.0pp over
+`kFlushAndCompaction` on the IM shape over a 10 GB table is selection, and
+the -3.7pp under it at the 8m-row size is selection too. The patch is 43
+lines and changes nothing when the filter is unset; the adapter's per-job
+overhead is now the inference plus one range lookup per data block, which
+is the paper's own cost model.
+
+**A workload that is not this repository's generator (item 1) exists, with a
+caveat that has to travel with it.** Facebook's ZippyDB model is the closest
+public thing to the traces a referee would ask for, and it is a model: 30
+key ranges of fixed hotness, a power law inside each, no movement of the hot
+set over time. It tests selective warming, not learning — the learned
+model's advantage over "hot last interval, hot next" is an AUC of 0.76
+against 0.66 on it. On that model the two engines give the two ends of the
+regime map in one experiment:
+
+| engine | write amplification in the window | best heuristic | Leaper (prefetch phase) |
+|---|---|---|---|
+| RocksDB 11.8, 3 GB cache | ~6 (647 MB of compaction on 104 MB flushed) | `kFlushAndCompaction` +0.88pp | +0.79 / +0.85pp: within noise of it |
+| LevelDB 1.23, 256 MB cache | ~700 (78 GB on 108 MB) | WarmFlushOnly +0.89pp | +11.05pp throttled, +11.32pp with the memo: ten points clear |
+
+RocksDB's compaction destroys so little that there is nothing to recover and
+warming everything is free; LevelDB's destroys so much that warming
+everything thrashes a cache the hot set fits in, and choosing the 29% that
+will be read is the whole game. Neither engine is X-Engine. The honest
+sentence for the journal is that the value of learned selection is a
+function of write amplification times cache pressure, that this repository
+can place both public engines on that curve, and that where the paper's
+engine sits on it is a number the paper's own data has to supply next to
+every result.
+
+**What the LevelDB result cost to believe.** The +11pp survived an
+async-warm control, a one-step control and a dry-run control, and the last
+of those is the one that should have been run first: it is the only control
+that removes the answer and keeps the cost. The earlier revision of this
+document called the result an artefact on the strength of the compaction
+count alone, and commit 9e2c816 carries that claim in its title; the dry
+run retracts it. The harness defect the investigation turned up (the
+monitor's clock drift, the seventeenth) inflated a QPS column, not a hit
+ratio, but it is exactly the kind of thing a referee finds first.
+
+**Still open.** Multi-seed variance (item 4): every table in this document
+is one run per cell, against noise floors measured on same-seed repeats
+(0.01pp on RocksDB at scale, 0.2-0.3pp on LevelDB); the LevelDB ZippyDB
+margin is thirty times its floor, the small RocksDB margins are not, and
+those need seeds before they are claims. A dedicated machine (item 2): the
+overhead and latency columns here were measured on a laptop behind a load
+gate, and the tail-latency non-repeatability noted in M8 has not been
+revisited. Phase 1 (item 5): still nothing measurable on LevelDB and not
+implementable on RocksDB; the journal version should present Leaper as a
+prefetcher with an optional eviction phase and say so.

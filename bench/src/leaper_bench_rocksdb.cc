@@ -60,8 +60,12 @@ struct Flags {
   double update_ratio = 0.20;
   double zipf = 0.99;
   // FAST'20 mixgraph (ZippyDB) model; see keygen.h. sine_a > 0 modulates
-  // op_rate as op_rate * (1 + (sine_a/sine_d) * sin(sine_b * t_us)), the
-  // paper's QPS wave (period 2*pi/sine_b = 86 s at the default).
+  // op_rate as op_rate * (1 + (sine_a/sine_d) * sin(sine_b * t_s)), the
+  // paper's QPS wave. db_bench's SineRate takes seconds, so the paper's
+  // sine_b = 0.000073 is a period of 86,069 s: the diurnal cycle. Over a
+  // 300 s run that is flat to 0.5%. (An earlier scaling of t in microseconds
+  // gave a period of 0.086 s, which averaged out inside every one-second
+  // row; no result changed.)
   int mix_keyrange_num = 30;
   double mix_keyrange_a = 14.18, mix_keyrange_b = -2.917, mix_keyrange_c = 0.0164, mix_keyrange_d = -0.08082;
   double mix_key_a = 0.002312, mix_key_b = 0.3467;
@@ -95,6 +99,8 @@ struct Flags {
   int warm_scan_keys = 4096;
   std::string warm_mode = "iterator";   // or "sst": block-level warming of the job's output files
   double leaper_max_prefetch_frac = 1.0;  // per-job warm budget as a fraction of the block cache
+  bool leaper_dry_run = false;  // predict as usual, warm nothing (Options::dry_run)
+  bool leaper_memo = true;      // memoise predictions within a second (Options::memoize_predictions)
   // LSM geometry. RocksDB's defaults (L1 = 256 MB, x10 per level) give a
   // 480 MB database five compactions in five minutes; LevelDB's hard-coded
   // L1 = 10 MB gives the same database ~250. Set level_base_mb=10 to compare
@@ -200,6 +206,8 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "warm_scan_keys", &v)) flags.warm_scan_keys = ParseInt("warm_scan_keys", v);
     else if (ParseFlag(a, "warm_mode", &v)) flags.warm_mode = v;
     else if (ParseFlag(a, "leaper_max_prefetch_frac", &v)) flags.leaper_max_prefetch_frac = ParseDouble("leaper_max_prefetch_frac", v);
+    else if (ParseFlag(a, "leaper_dry_run", &v)) flags.leaper_dry_run = ParseBool("leaper_dry_run", v);
+    else if (ParseFlag(a, "leaper_memo", &v)) flags.leaper_memo = ParseBool("leaper_memo", v);
     else if (ParseFlag(a, "level_base_mb", &v)) flags.level_base_mb = ParseInt("level_base_mb", v);
     else if (ParseFlag(a, "l0_trigger", &v)) flags.l0_trigger = ParseInt("l0_trigger", v);
     else if (ParseFlag(a, "dynamic_level_bytes", &v)) flags.dynamic_level_bytes = ParseInt("dynamic_level_bytes", v);
@@ -287,8 +295,9 @@ void WorkerLoop(Shared* s, int tid) {
       const double elapsed = (t0 - s->run_start_us) / 1e6;
       double allowed = flags.op_rate * elapsed;
       if (flags.sine_a > 0.0 && flags.sine_d > 0.0 && flags.sine_b > 0.0) {
-        // Integral of op_rate * (1 + (a/d) sin(b' t)) with b' in rad/s.
-        const double bs = flags.sine_b * 1e6;
+        // Integral of op_rate * (1 + (a/d) sin(b t)) with t in seconds and
+        // b in rad/s, as db_bench's SineRate(usecs / 1e6) has it.
+        const double bs = flags.sine_b;
         allowed = flags.op_rate * (elapsed + (flags.sine_a / flags.sine_d) * (1.0 - std::cos(bs * elapsed)) / bs);
       }
       const uint64_t budget = static_cast<uint64_t>(allowed) + 1;
@@ -380,6 +389,8 @@ int Run() {
     ao.core.t2_beta = flags.leaper_t2_beta;
     ao.core.cache_bytes = static_cast<double>(flags.cache_mb) * 1024 * 1024;
     ao.core.max_prefetch_frac = flags.leaper_max_prefetch_frac;
+    ao.core.dry_run = flags.leaper_dry_run;
+    ao.core.memoize_predictions = flags.leaper_memo;
     ao.core.precursor_path = flags.precursors;
     ao.num_ranges = flags.num / flags.leaper_range_size + 1;
     ao.warm_scan_keys = flags.warm_scan_keys;
@@ -535,7 +546,14 @@ int Run() {
       prev_flush = ticker(rocksdb::FLUSH_WRITE_BYTES);
       prev_comp = ticker(rocksdb::COMPACT_WRITE_BYTES);
     }
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    // Sleep to the tick, not for a second, so that a stats call that waits on
+    // the core's mutex during a prediction cannot stretch the row (the LevelDB
+    // harness drifted 8% that way on the ZippyDB model; M9, section 2).
+    {
+      const uint64_t tick = shared.run_start_us + static_cast<uint64_t>(sec) * 1000000ULL;
+      const uint64_t now = NowUs();
+      if (tick > now) std::this_thread::sleep_for(std::chrono::microseconds(tick - now));
+    }
     if (sec <= flags.warmup) continue;
 
     const uint64_t reads = shared.reads.load(), writes = shared.writes.load();
@@ -606,13 +624,14 @@ int Run() {
   if (adapter != nullptr) {
     const leaper::Stats ls = adapter->stats();
     std::fprintf(stderr,
-        "[leaper] reads_seen=%" PRIu64 " inferences=%" PRIu64 " (%.2f us/inf) "
+        "[leaper] reads_seen=%" PRIu64 " inferences=%" PRIu64 " (%.2f us/inf) memo_hits=%" PRIu64 " "
         "hot=%" PRIu64 " warmed_ranges=%" PRIu64 " warm_us=%" PRIu64
         " warm_mode=%s warmed_blocks=%" PRIu64 " warm_files=%" PRIu64
         " warm_open_failed=%" PRIu64 " warm_budget_stops=%" PRIu64
         " prepop_rejected=%" PRIu64 "\n",
         ls.reads_seen, ls.inferences,
         ls.inferences ? static_cast<double>(ls.inference_us) / ls.inferences : 0.0,
+        ls.memo_hits,
         ls.ranges_predicted_hot, adapter->warmed_ranges(), adapter->warm_us(),
         flags.warm_mode.c_str(), adapter->warmed_blocks(), adapter->warm_files(),
         adapter->warm_open_failed(), adapter->warm_budget_stops(),
@@ -620,9 +639,9 @@ int Run() {
     if (ls.inference_us > 0.2 * 1e6 * static_cast<double>(flags.duration + flags.warmup)) {
       std::fprintf(stderr,
           "[leaper] WARNING: inference took %.0f s of a %d s run on background threads; "
-          "if compaction is the bottleneck this throttles it and inflates the hit ratio. "
-          "Check the compaction volume against the other policies before reading the "
-          "hit ratio as a prefetching result.\n",
+          "if compaction is the bottleneck this throttles it. Compare the compaction "
+          "volume with the stock row, and measure what the throttling alone is worth "
+          "with --leaper_dry_run=1 before attributing the margin to prefetching.\n",
           ls.inference_us / 1e6, flags.duration + flags.warmup);
     }
   }

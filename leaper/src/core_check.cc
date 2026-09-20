@@ -11,6 +11,9 @@
 //      is nested inside an earlier one.
 //   7. Single model. One model stands in for every step, including the
 //      compaction prefetch phase whose steps start at 2.
+//   M9. Prediction memo. Two jobs that begin in the same second with the same
+//      step range share one prediction; a later second, or the memo switched
+//      off, predicts again.
 //
 // The model used is a hand-written LightGBM text file with one single-leaf
 // tree, so it predicts "hot" for every range; what is under test is the
@@ -67,9 +70,11 @@ std::string WriteAlwaysHotModel(const std::string& dir, int n_features) {
 }
 
 std::unique_ptr<leaper::Leaper> OpenCore(leaper::Policy policy, const std::string& model,
-                                         leaper::RangeMapper* mapper, RecordingCache* cache) {
+                                         leaper::RangeMapper* mapper, RecordingCache* cache,
+                                         bool memoize = true) {
   leaper::Options o;
   o.policy = policy;
+  o.memoize_predictions = memoize;
   o.range_size = 1000;
   o.max_range_id = 1000;
   o.slot_seconds = 1.0;
@@ -243,6 +248,48 @@ void TestNestedFlushRestoresCompaction(const std::string& model) {
   }
 }
 
+// ---------------------------------------------------------------------------
+void TestPredictionMemo(const std::string& model) {
+  // A compaction over ranges 0..99 with the single always-hot model makes one
+  // inference per range per phase: 200. The pinned T1/T2 keep k1, k2 and so
+  // the step ranges identical from job to job.
+  leaper::CompactionInfo info;
+  info.is_flush = false;
+  info.est_blocks = 3;
+  const std::vector<leaper::BlockRef> in = {Block(0, 49), Block(50, 99)};
+  {
+    RecordingCache cache;
+    std::unique_ptr<leaper::RangeMapper> mapper = leaper::NewDecimalRangeMapper(1000);
+    std::unique_ptr<leaper::Leaper> core = OpenCore(leaper::Policy::kLeaper, model,
+                                                    mapper.get(), &cache);
+    core->OnCompactionBegin(info, in, 1000000);
+    core->OnCompactionEnd(info, 1100000);
+    const uint64_t first = core->stats().inferences;
+    CHECK(first == 200, "memo: first job should make 200 inferences");
+    core->OnCompactionBegin(info, in, 1200000);  // same second, same steps
+    CHECK(core->ShouldPrefetch(Block(70, 70), 1200000),
+          "memo: second job in the same second lost its prediction");
+    core->OnCompactionEnd(info, 1300000);
+    CHECK(core->stats().inferences == first, "memo: second job in the same second predicted again");
+    CHECK(core->stats().memo_hits == 200, "memo: second job should have 200 memo hits");
+    core->OnCompactionBegin(info, in, 2000000);  // next second
+    core->OnCompactionEnd(info, 2100000);
+    CHECK(core->stats().inferences == 2 * first, "memo: a new second must predict again");
+  }
+  {
+    RecordingCache cache;
+    std::unique_ptr<leaper::RangeMapper> mapper = leaper::NewDecimalRangeMapper(1000);
+    std::unique_ptr<leaper::Leaper> core = OpenCore(leaper::Policy::kLeaper, model,
+                                                    mapper.get(), &cache, /*memoize=*/false);
+    core->OnCompactionBegin(info, in, 1000000);
+    core->OnCompactionEnd(info, 1100000);
+    core->OnCompactionBegin(info, in, 1200000);
+    core->OnCompactionEnd(info, 1300000);
+    CHECK(core->stats().inferences == 400, "memo off: every job must predict");
+    CHECK(core->stats().memo_hits == 0, "memo off: no memo hits expected");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -252,6 +299,7 @@ int main(int argc, char** argv) {
   TestSingleModelCompactionPrefetch(model);
   TestFlushHasCandidates(model);
   TestNestedFlushRestoresCompaction(model);
+  TestPredictionMemo(model);
   if (g_failed) {
     std::fprintf(stderr, "core_check: %d FAILED\n", g_failed);
     return 1;

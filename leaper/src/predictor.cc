@@ -81,7 +81,8 @@ void Predictor::BuildFeatures(const Collector& collector, RangeId range,
 void Predictor::PredictHot(const Collector& collector,
                            const std::vector<RangeId>& candidates, int step_lo,
                            int step_hi, uint64_t now_us, double threshold,
-                           std::vector<RangeId>* out, uint64_t* inferences) const {
+                           std::vector<RangeId>* out, uint64_t* inferences,
+                           uint64_t* memo_hits) const {
   const int n = feature_count();
   std::vector<float> f(n, 0.0f);
   const int last = static_cast<int>(models_.size());
@@ -95,13 +96,39 @@ void Predictor::PredictHot(const Collector& collector,
   else step_hi = std::min(last, step_hi);
   if (step_hi < step_lo) return;
 
+  Memo* memo = nullptr;
+  if (memoize_) {
+    const uint64_t sec = now_us / 1000000;
+    const uint64_t slot = collector.SlotOf(now_us);
+    // Memos from any earlier second or slot are dead; drop them all.
+    memo_.erase(std::remove_if(memo_.begin(), memo_.end(),
+                               [&](const Memo& m) { return m.sec != sec || m.slot != slot; }),
+                memo_.end());
+    for (Memo& m : memo_) {
+      if (m.lo == step_lo && m.hi == step_hi) memo = &m;
+    }
+    if (memo == nullptr) {
+      memo_.push_back(Memo{sec, slot, step_lo, step_hi, {}});
+      memo = &memo_.back();
+    }
+  }
+
   for (RangeId r : candidates) {
+    if (memo != nullptr && r < memo->hot.size() && memo->hot[r] >= 0) {
+      if (memo->hot[r]) out->push_back(r);
+      if (memo_hits) ++*memo_hits;
+      continue;
+    }
     BuildFeatures(collector, r, now_us, f.data());
     bool hot = false;
     for (int s = step_lo; s <= step_hi && !hot; ++s) {
       const GbdtModel& m = single ? models_[0] : models_[s - 1];
       if (m.Predict(f.data(), n) >= threshold) hot = true;
       if (inferences) ++*inferences;
+    }
+    if (memo != nullptr) {
+      if (r >= memo->hot.size()) memo->hot.resize(r + 1, -1);
+      memo->hot[r] = hot ? 1 : 0;
     }
     if (hot) out->push_back(r);
   }

@@ -34,13 +34,31 @@ class Predictor {
 
   // Fills |out| with the ranges among |candidates| predicted hot for any step
   // in [step_lo, step_hi] (1-based, clamped to the models available).
+  // |inferences| counts model evaluations, |memo_hits| answers served from
+  // the memo; either may be null. Not thread-safe: the core calls this under
+  // its own mutex, and the memo relies on that.
   void PredictHot(const Collector& collector, const std::vector<RangeId>& candidates,
                   int step_lo, int step_hi, uint64_t now_us, double threshold,
-                  std::vector<RangeId>* out, uint64_t* inferences) const;
+                  std::vector<RangeId>* out, uint64_t* inferences,
+                  uint64_t* memo_hits = nullptr) const;
+
+  // Options::memoize_predictions; see leaper.h.
+  void set_memoize(bool on) { memoize_ = on; }
 
  private:
   void BuildFeatures(const Collector& collector, RangeId range, uint64_t now_us,
                      float* f) const;
+
+  // One memo per (second, slot, step range): hot[r] is -1 unknown, 0, or 1.
+  // Keyed on the slot as well as the second so that sub-second slots, whose
+  // history features change inside a second, are never served stale.
+  struct Memo {
+    uint64_t sec = 0, slot = 0;
+    int lo = 0, hi = 0;
+    std::vector<int8_t> hot;
+  };
+  mutable std::vector<Memo> memo_;
+  bool memoize_ = true;
 
   std::vector<GbdtModel> models_;
   std::unordered_map<RangeId, std::vector<RangeId>> precursors_;

@@ -38,6 +38,7 @@ hit out                  : hit ratio outside the windows -- where prefetched blo
 -- with collector sampling P=0.01 (m4_ovh_s01):
 Leaper (both phases)  (missing)
 Leaper (sst warm)     (missing)
+Leaper (prepopulate)  (missing)
 Leaper (prefetch only)     98.81%    +0.00pp    990495    +0.0%       10       16    1,402,874     98      -
 Leaper (prefetch, SSAD)  (missing)
 Leaper + row cache    (missing)
@@ -576,3 +577,77 @@ LRU (stock)              70.18%    +0.00pp     60279    +0.0%       24       31 
 kFlushOnly               78.39%    +8.21pp     60253    -0.0%       22       60      704,608   6887    44%
 kFlushAndCompaction      89.31%   +19.13pp     60340    +0.1%       22       29      348,994   6878    44%
 Leaper (sst warm)        85.57%   +15.39pp     60286    +0.0%       21       29      469,504   6884    44%
+
+=============== M9: journal prep ===============
+
+################ M9.1 Leaper through RocksDB's patched prepopulate path (_v6) next to the _v5 rows ################
+-- m7paper3
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              90.12%    +0.00pp     60161    +0.0%       19      112      899,678   2550    18%
+kFlushOnly               91.52%    +1.40pp     60271    +0.2%       21      130      773,865   2822    19%
+kFlushAndCompaction      91.40%    +1.28pp     60307    +0.2%       21       95      784,914   2815    19%
+Leaper (sst warm)        91.67%    +1.55pp     60298    +0.2%       21       85      760,164   2801    19%
+Leaper (prepopulate)      91,65%  (prepopulate, _v6)
+-- m7zipf09
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              54.54%    +0.00pp     60348    +0.0%      127      212    1,668,232   5851    38%
+kFlushOnly               56.42%    +1.88pp     60207    -0.2%      154      274    1,596,655   5838    38%
+kFlushAndCompaction      61.06%    +6.52pp     60227    -0.2%      154      255    1,426,581   5840    38%
+Leaper (sst warm)        63.26%    +8.71pp     60210    -0.2%      129      215    1,331,272   5835    38%
+Leaper (prepopulate)      63,10%  (prepopulate, _v6)
+-- m7fit_im
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              70.18%    +0.00pp     60279    +0.0%       24       31      973,292   6887    44%
+kFlushOnly               78.39%    +8.21pp     60253    -0.0%       22       60      704,608   6887    44%
+kFlushAndCompaction      89.31%   +19.13pp     60340    +0.1%       22       29      348,994   6878    44%
+Leaper (sst warm)        85.57%   +15.39pp     60286    +0.0%       21       29      469,504   6884    44%
+Leaper (prepopulate)      85,66%  (prepopulate, _v6)
+
+################ M9.2 FAST'20 ZippyDB model (mixgraph): RocksDB m7zippy, LevelDB m4zippy ################
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              81.15%    +0.00pp     60142    +0.0%       26       33    2,885,765    645    10%
+kFlushOnly               81.31%    +0.16pp     60152    +0.0%       24       31    2,861,212    646    10%
+kFlushAndCompaction      82.03%    +0.88pp     60130    -0.0%       27       33    2,750,556    647    10%
+Leaper (sst warm)        81.94%    +0.79pp     60183    +0.1%       24       32    2,762,156    646    10%
+Leaper (prepopulate)     82.00%    +0.85pp     60165    +0.0%       25       31    2,752,067    646    10%
+----------------------------------------------------------------------------------------------------------
+LRU (stock)              73.56%    +0.00pp     60194    +0.0%       13       25    3,994,005   1783    54%
+EagerEvict               74.26%    +0.70pp     60150    -0.1%       13       24    3,885,556   1739    53%
+IncrementalWarmup        72.02%    -1.53pp     60253    +0.1%       14       25    4,230,305   1628    51%
+WarmAll                  65.38%    -8.18pp     60225    +0.1%       14       26    5,232,198   1606    51%
+WarmFlushOnly            74.44%    +0.89pp     60147    -0.1%       13       25    3,856,642   1743    53%
+Leaper (prefetch only)     84.61%   +11.05pp     65993    +9.6%       14       24    2,545,629    671    28%
+-- LevelDB controls (docs/M9-journal-prep.md, section 2): async warm, one step, 100k ranges, dry run, v9 (memo + tick monitor)
+  [m4zippy_async] ----------------------------------------------------------------------------------------------------------
+  [m4zippy_async] WarmAll                  64.24%    +0.00pp     60238    +0.0%       15       27    5,405,953   1703    53%
+  [m4zippy_async] Leaper (prefetch only)     84.59%   +20.35pp     65765    +9.2%       14       24    2,540,033    664    27%
+  [m4zippy_async] 
+  [m4zippy_async] comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+  [m4zippy_async]        (RocksDB, whose harness records bytes); bg lk: share of all block cache
+  [m4zippy_async] lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
+  [m4zippy_step1] ----------------------------------------------------------------------------------------------------------
+  [m4zippy_step1] Leaper (prefetch only)     84.88%    +0.00pp     62175    +0.0%       14       25    2,358,202    984    38%
+  [m4zippy_step1] 
+  [m4zippy_step1] comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+  [m4zippy_step1]        (RocksDB, whose harness records bytes); bg lk: share of all block cache
+  [m4zippy_step1] lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
+  [m4zippy_r100k] ----------------------------------------------------------------------------------------------------------
+  [m4zippy_r100k] LRU (stock)              73.55%    +0.00pp     60246    +0.0%       13       25    3,998,527   1789    54%
+  [m4zippy_r100k] Leaper (prefetch only)     65.72%    -7.83pp     60228    -0.0%       15       26    5,181,327   1587    51%
+  [m4zippy_r100k] 
+  [m4zippy_r100k] comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+  [m4zippy_r100k]        (RocksDB, whose harness records bytes); bg lk: share of all block cache
+  [m4zippy_r100k] lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
+  [m4zippy_dry] ----------------------------------------------------------------------------------------------------------
+  [m4zippy_dry] Leaper (prefetch only)     74.53%    +0.00pp     65578    +0.0%       14       24    4,183,812    668    28%
+  [m4zippy_dry] 
+  [m4zippy_dry] comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+  [m4zippy_dry]        (RocksDB, whose harness records bytes); bg lk: share of all block cache
+  [m4zippy_dry] lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)
+  [m4zippy_v9] ----------------------------------------------------------------------------------------------------------
+  [m4zippy_v9] LRU (stock)              73.53%    +0.00pp     59998    +0.0%       14       26    3,984,550   1756    53%
+  [m4zippy_v9] Leaper (prefetch only)     84.86%   +11.32pp     59999    +0.0%       14       24    2,277,022   1066    41%
+  [m4zippy_v9] 
+  [m4zippy_v9] comps: compactions completed in the measured window (LevelDB) or MB written by compaction
+  [m4zippy_v9]        (RocksDB, whose harness records bytes); bg lk: share of all block cache
+  [m4zippy_v9] lookups made by the engine's background thread, excluded from the hit ratio (v3 runs)

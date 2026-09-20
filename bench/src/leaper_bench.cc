@@ -63,8 +63,12 @@ struct Flags {
   int scan_len = 32;
   double zipf = 0.99;
   // FAST'20 mixgraph (ZippyDB) model; see keygen.h. sine_a > 0 modulates
-  // op_rate as op_rate * (1 + (sine_a/sine_d) * sin(sine_b * t_us)), the
-  // paper's QPS wave (period 2*pi/sine_b = 86 s at the default).
+  // op_rate as op_rate * (1 + (sine_a/sine_d) * sin(sine_b * t_s)), the
+  // paper's QPS wave. db_bench's SineRate takes seconds, so the paper's
+  // sine_b = 0.000073 is a period of 86,069 s: the diurnal cycle. Over a
+  // 300 s run that is flat to 0.5%. (An earlier scaling of t in microseconds
+  // gave a period of 0.086 s, which averaged out inside every one-second
+  // row; no result changed.)
   int mix_keyrange_num = 30;
   double mix_keyrange_a = 14.18, mix_keyrange_b = -2.917, mix_keyrange_c = 0.0164, mix_keyrange_d = -0.08082;
   double mix_key_a = 0.002312, mix_key_b = 0.3467;
@@ -131,6 +135,8 @@ struct Flags {
   double leaper_max_prefetch_frac = 1.0;  // no cap by default: WarmAll must mean warm all
   std::string key_format = "decimal";
   bool leaper_phase1 = true;
+  bool leaper_dry_run = false;  // predict on the compaction thread, warm nothing
+  bool leaper_memo = true;      // memoise predictions within a second (Options::memoize_predictions)
   bool warm_async = false;   // warm from a dedicated thread instead of the compaction thread
   bool leaper_phase2 = true;
   double ssad_miss_threshold = 0.0;
@@ -263,6 +269,8 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "leaper_max_prefetch_frac", &v)) flags.leaper_max_prefetch_frac = ParseDouble("leaper_max_prefetch_frac", v);
     else if (ParseFlag(a, "key_format", &v)) flags.key_format = v;
     else if (ParseFlag(a, "leaper_phase1", &v)) flags.leaper_phase1 = ParseBool("leaper_phase1", v);
+    else if (ParseFlag(a, "leaper_dry_run", &v)) flags.leaper_dry_run = ParseBool("leaper_dry_run", v);
+    else if (ParseFlag(a, "leaper_memo", &v)) flags.leaper_memo = ParseBool("leaper_memo", v);
     else if (ParseFlag(a, "warm_async", &v)) flags.warm_async = ParseBool("warm_async", v);
     else if (ParseFlag(a, "leaper_phase2", &v)) flags.leaper_phase2 = ParseBool("leaper_phase2", v);
     else if (ParseFlag(a, "ssad_miss_threshold", &v)) flags.ssad_miss_threshold = ParseDouble("ssad_miss_threshold", v);
@@ -361,8 +369,9 @@ void WorkerLoop(Shared* s, int tid) {
       const double elapsed = (t0 - s->run_start_us) / 1e6;
       double allowed = flags.op_rate * elapsed;
       if (flags.sine_a > 0.0 && flags.sine_d > 0.0 && flags.sine_b > 0.0) {
-        // Integral of op_rate * (1 + (a/d) sin(b' t)) with b' in rad/s.
-        const double bs = flags.sine_b * 1e6;
+        // Integral of op_rate * (1 + (a/d) sin(b t)) with t in seconds and
+        // b in rad/s, as db_bench's SineRate(usecs / 1e6) has it.
+        const double bs = flags.sine_b;
         allowed = flags.op_rate * (elapsed + (flags.sine_a / flags.sine_d) * (1.0 - std::cos(bs * elapsed)) / bs);
       }
       const uint64_t budget = static_cast<uint64_t>(allowed) + 1;
@@ -509,6 +518,8 @@ int Run() {
     ao.core.cache_bytes = static_cast<double>(flags.cache_mb) * 1024 * 1024;
     ao.core.max_prefetch_frac = flags.leaper_max_prefetch_frac;
     ao.core.enable_phase1 = flags.leaper_phase1;
+    ao.core.dry_run = flags.leaper_dry_run;
+    ao.core.memoize_predictions = flags.leaper_memo;
     ao.warm_async = flags.warm_async;
     ao.core.enable_phase2 = flags.leaper_phase2;
     ao.core.ssad_miss_threshold = flags.ssad_miss_threshold;
@@ -712,7 +723,17 @@ int Run() {
       // the rest of the run.
       if (sec > flags.warmup + 1) adapter->set_health(last_miss_ratio);
     }
-    env->SleepForMicroseconds(1000000);
+    // Sleep to the tick, not for a second. The stats calls in this loop wait
+    // on the core's mutex while a prediction holds it (up to 250 ms a job on
+    // the ZippyDB model), so "work, then sleep one second" drifted: with 72%
+    // of a run inside inference, 300 rows spanned 325 s of wall clock and
+    // the QPS column read 10% above the rate budget (M9, section 2). Hit
+    // ratios are unaffected; per-row counts and QPS were not.
+    {
+      const uint64_t tick = shared.run_start_us + static_cast<uint64_t>(sec) * 1000000ULL;
+      const uint64_t now = env->NowMicros();
+      if (tick > now) env->SleepForMicroseconds(static_cast<int>(tick - now));
+    }
     if (sec <= flags.warmup) continue;
 
     const uint64_t reads = shared.reads.load();
@@ -807,7 +828,7 @@ int Run() {
     const leaper::Stats ls = adapter->stats();
     std::fprintf(stderr,
         "[leaper] reads_seen=%" PRIu64 " writes_seen=%" PRIu64 " sampled=%" PRIu64 "\n"
-        "[leaper] inferences=%" PRIu64 " inference_us=%" PRIu64 " (%.2f us/inf)\n"
+        "[leaper] inferences=%" PRIu64 " inference_us=%" PRIu64 " (%.2f us/inf) memo_hits=%" PRIu64 "\n"
         "[leaper] hot=%" PRIu64 " cold=%" PRIu64 " prefetched=%" PRIu64
         " evicted=%" PRIu64 " refused_budget=%" PRIu64 "\n"
         "[leaper] warm_calls=%" PRIu64 " warm_us=%" PRIu64 " warm_FAILED=%" PRIu64
@@ -816,6 +837,7 @@ int Run() {
         "ssad_suspensions=%" PRIu64 "\n",
         ls.reads_seen, ls.writes_seen, ls.sampled, ls.inferences, ls.inference_us,
         ls.inferences ? static_cast<double>(ls.inference_us) / ls.inferences : 0.0,
+        ls.memo_hits,
         ls.ranges_predicted_hot, ls.ranges_predicted_cold, ls.blocks_prefetched,
         ls.blocks_evicted, ls.prefetch_refused_budget,
         adapter->warmed_blocks(), adapter->warm_us(), adapter->warm_failed(),
@@ -824,9 +846,9 @@ int Run() {
     if (ls.inference_us > 0.2 * 1e6 * static_cast<double>(flags.duration + flags.warmup)) {
       std::fprintf(stderr,
           "[leaper] WARNING: inference took %.0f s of a %d s run on the engine's background "
-          "thread; on a compaction-bound engine this throttles compaction and inflates the hit "
-          "ratio (fewer invalidations). Reduce the candidate set (coarser ranges) before "
-          "reading the hit ratio as a prefetching result.\n",
+          "thread; on a compaction-bound engine this throttles compaction. Compare the "
+          "compaction count with the stock row, and measure what the throttling alone is "
+          "worth with --leaper_dry_run=1 before attributing the margin to prefetching.\n",
           ls.inference_us / 1e6, flags.duration + flags.warmup);
     }
     if (adapter->warm_failed() > 0) {

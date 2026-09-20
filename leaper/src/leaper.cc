@@ -136,6 +136,7 @@ class LeaperImpl : public Leaper {
       if (error) *error = "policy=leaper requires at least one model path";
       return false;
     }
+    predictor_.set_memoize(opt_.memoize_predictions);
     return predictor_.Load(opt_.model_paths, opt_.precursor_path, opt_.history_slots,
                            3, error);
   }
@@ -258,12 +259,12 @@ class LeaperImpl : public Leaper {
       // A flush is short: the paper predicts its accesses directly in one
       // phase rather than splitting into eviction and prefetch.
       predictor_.PredictHot(collector_, candidates, 1, k2, now_us,
-                            opt_.hot_threshold, &hot2, &stats_.inferences);
+                            opt_.hot_threshold, &hot2, &stats_.inferences, &stats_.memo_hits);
     } else {
       predictor_.PredictHot(collector_, candidates, 1, k1, now_us,
-                            opt_.hot_threshold, &hot1, &stats_.inferences);
+                            opt_.hot_threshold, &hot1, &stats_.inferences, &stats_.memo_hits);
       predictor_.PredictHot(collector_, candidates, k1 + 1, k1 + k2, now_us,
-                            opt_.hot_threshold, &hot2, &stats_.inferences);
+                            opt_.hot_threshold, &hot2, &stats_.inferences, &stats_.memo_hits);
     }
     stats_.inference_us += NowUs() - t_infer0;
     stats_.ranges_predicted_hot += hot2.size();
@@ -271,6 +272,13 @@ class LeaperImpl : public Leaper {
         candidates.size() > hot2.size() ? candidates.size() - hot2.size() : 0;
 
     hot_t2_ = ToSpans(hot2);
+
+    if (opt_.dry_run) {
+      // The inference has been paid for on this thread; its answer is
+      // discarded, so the run measures the cost alone.
+      hot_t2_.clear();
+      return;
+    }
 
     if (!info.is_flush && opt_.enable_phase1) {
       // Phase 1. The input SSTs stay readable until the new version is

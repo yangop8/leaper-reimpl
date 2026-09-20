@@ -148,3 +148,5 @@ for T in m7paper3 m7zipf09 m7fit_im; do echo "-- $T"; $PY tools/summarize_matrix
 sec "M9.2 FAST'20 ZippyDB model (mixgraph): RocksDB m7zippy, LevelDB m4zippy"
 $PY tools/summarize_matrix.py $OUT m7zippy 2>/dev/null | grep -v missing | sed -n '3,8p'
 $PY tools/summarize_matrix.py $OUT m4zippy 2>/dev/null | grep -v missing | sed -n '3,9p'
+echo "-- LevelDB controls (docs/M9-journal-prep.md, section 2): async warm, one step, 100k ranges, dry run, v9 (memo + tick monitor)"
+for T in m4zippy_async m4zippy_step1 m4zippy_r100k m4zippy_dry m4zippy_v9; do $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,9p' | sed "s/^/  [$T] /"; done

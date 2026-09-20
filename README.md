@@ -29,10 +29,12 @@ costs, and that quantity depends on every row of that table. **Treat the
 measurements here as evidence about this setup, not as a verdict on the
 paper.**
 
-**Sixteen defects were found in this harness, two of which invalidated every
-hit ratio measured before them; the last eight came from an independent code
-review on 2026-09-19 (`docs/code-review-2026-09-19.md`), and the numbers
-below were re-measured with them fixed.** Compaction-output warming silently failed
+**Seventeen defects were found in this harness, two of which invalidated every
+hit ratio measured before them; eight came from an independent code review
+on 2026-09-19 (`docs/code-review-2026-09-19.md`), the seventeenth from
+chasing a result that looked too good (M9: a monitor-clock drift that
+inflated one QPS column, not a hit ratio), and the numbers below were
+re-measured with them fixed.** Compaction-output warming silently failed
 for months of work because a hook fired before the output file was synced, and
 the hit ratio counted the engine's own compaction reads as workload lookups,
 which handed a free 2pp to whichever policy slowed compaction down the most.
@@ -128,7 +130,33 @@ positive rate was exactly 1.000, the model predicted every range hot, and
 Leaper's hit ratio equalled warming everything to four decimal places. The
 paper's models reach 0.95 precision and recall on real Tmall and DingTalk
 traces, so on that data the label clearly does carry information. This is a
-limit of the synthetic generator, not evidence against the paper.
+limit of the synthetic generator, not evidence against the paper: on
+Facebook's FAST'20 ZippyDB model (M9), 29% of the 2,000-key ranges are hot
+in a given second and there is something to select.
+
+**The value of learned selection is write amplification times cache
+pressure, and the same workload model puts the two engines at opposite ends
+of that curve.** On the ZippyDB model, RocksDB rewrites about six times what
+it ingests and every policy that warms compaction output is worth +0.8 to
++0.9pp, Leaper included: there is nothing to recover, so warming everything
+is free. LevelDB rewrites 700 times its ingest into a 256 MB cache that
+holds the hot range with room to spare; there warming everything loses
+8pp by evicting the working set, and Leaper, warming the 29% that will be
+read, gains +11.3pp — the largest margin over any heuristic measured
+here, and the paper's regime.
+
+**A policy's cost on the background thread is a confound, and the control
+for it is a dry run.** Leaper's inference on LevelDB's single background
+thread (25,000 candidate ranges per job, 5 us each) took 72% of the run and
+cut compactions from 1,783 to 671; the first reading of the +11pp above was
+that fewer compactions meant fewer invalidations and the gain was an
+artefact. `--leaper_dry_run=1` pays the same inference and discards every
+prediction: +0.97pp, of which +0.70 is the dead-block floor. The throttling
+was worth a third of a point; the prefetching was the rest. The cost is
+real, though, so predictions are now memoised within a second
+(`Options::memoize_predictions`: the ten jobs LevelDB starts in a second
+were making the same 25,000 predictions ten times over), and the benches
+warn when inference exceeds 20% of a run.
 
 **Measure what the workload sees, not what the cache sees.** LevelDB's
 compaction thread looks up every input block in the block cache
@@ -155,8 +183,9 @@ eleventh defects present.
 
 ## Results
 
-Two headline matrices, both corrected. Full detail, and thirteen more
-configurations, in [`docs/M8-review-followup.md`](docs/M8-review-followup.md).
+Three headline matrices, all corrected. Full detail, and thirteen more
+configurations, in [`docs/M8-review-followup.md`](docs/M8-review-followup.md)
+and [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md).
 
 **LevelDB, NVMe, 128 MB cache, 300 s** — the regime where selection pays:
 
@@ -190,6 +219,25 @@ on RocksDB, +8.36pp against warming everything's +6.49pp. At that table's own
 this configuration — the same policy's mean per-second p99 varied threefold
 between two identical runs — so no ordering is claimed for it.) The
 read-heavy e-commerce shape leaves nothing to select at all.
+
+**LevelDB, Facebook's FAST'20 ZippyDB model (`--key_dist=mixgraph`), 50M
+records, 256 MB cache, 300 s** — the paper's regime: the hot range fits in
+the cache, and compaction rewrites 700x what the workload writes:
+
+| policy | hit ratio | vs LRU | compactions in window | prefetch precision |
+|---|---|---|---|---|
+| LRU (stock) | 73.56% | — | 1,783 | — |
+| EagerEvict | 74.26% | +0.70pp | 1,739 | — |
+| IncrementalWarmup (the paper's baseline) | 72.02% | -1.53pp | 1,628 | 0.13 |
+| WarmAll | 65.38% | -8.18pp | 1,606 | 0.08 |
+| WarmFlushOnly | 74.44% | +0.89pp | 1,743 | 0.75 |
+| Leaper (prefetch phase), inference on the compaction thread | 84.61% | +11.05pp | 671 | 0.66 |
+| Leaper, same inference, predictions discarded (dry run) | 74.53% | +0.97pp | 668 | — |
+| **Leaper (prefetch phase), predictions memoised** | **84.86%** | **+11.32pp** | 1,066 | 0.57 |
+
+On RocksDB the same model, at 3 GB of cache, gives every policy that warms
+compaction output +0.8 to +0.9pp and Leaper equal to `kFlushAndCompaction`
+within noise; the same table, both engines, is in M9.
 
 ## Layout
 
@@ -286,20 +334,28 @@ ranges through a DB iterator.
 | M4 | Baseline matrix, oracle upper bound, regime sweeps | [`docs/M4-results.md`](docs/M4-results.md) |
 | M5-M7 | Core/adapter split and the RocksDB port | [`docs/M5-M7-rocksdb.md`](docs/M5-M7-rocksdb.md) |
 | M8 | Review follow-up: sixteen defects over three review rounds, the paper's own metrics, real traces, and the corrected measurements in section H | [`docs/M8-review-followup.md`](docs/M8-review-followup.md) |
-| M9 | Toward the journal version: selective prepopulate on RocksDB, the FAST'20 workload model | [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md) |
+| M9 | Toward the journal version: selective prepopulate on RocksDB (the re-read never mattered), the FAST'20 ZippyDB model on both engines, the dry-run control, the seventeenth defect, memoised predictions | [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md) |
 
 ## Known gaps
 
-* **No real database trace yet.** The Twitter cache traces turn out to be the
-  wrong instrument for a key-range predictor: anonymised hash-like keys carry
-  no locality in byte order, and the 1M-request samples span minutes rather
-  than days. Meta's FAST'20 RocksDB traces are the right next dataset, and the
-  converter and pipeline are in place (`tools/convert_twitter_trace.py`).
+* **No real database trace.** The Twitter cache traces are the wrong
+  instrument for a key-range predictor (anonymised hash-like keys carry no
+  locality in byte order, and the 1M-request samples span minutes), and
+  Meta's FAST'20 RocksDB traces were never released. What exists is the
+  *model* Meta fitted to ZippyDB and shipped in `db_bench`, ported here as
+  `--key_dist=mixgraph` (M9). It has fixed range hotness and no movement of
+  the hot set, so it tests selective warming, not learning: the learned
+  model's AUC on it is 0.76 against 0.66 for "hot last interval, hot next".
 * **The RocksDB results in section H were measured with the plug-in
   re-reading what it warms**, against a built-in that warms from memory.
-  That asymmetry is closed by the `prepop` warm mode (M9), which needs the
-  RocksDB patch; the section-H RocksDB rows are kept as the zero-patch
-  result.
+  Closed in M9: through the patched prepopulate path Leaper lands within
+  0.2pp of the re-read path on all three configurations, so no section-H
+  RocksDB margin was a cost artefact. The section-H rows are kept as the
+  zero-patch result.
+* **One run per cell.** Every table is a single run against a noise floor
+  measured on same-seed repeats (0.01pp on RocksDB at scale, 0.2-0.3pp on
+  LevelDB). Margins under a point on RocksDB need seeds before they are
+  claims.
 * **No phase 1 on RocksDB.** Block cache keys derive from a per-file
   `OffsetableCacheKey` held inside the table reader, so eviction is not
   implementable as a plug-in there. Phase 2 is, through `--warm_mode=sst`.

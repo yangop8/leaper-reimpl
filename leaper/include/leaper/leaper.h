@@ -159,6 +159,25 @@ struct Options {
   // working set it is supposed to protect.
   double max_prefetch_frac = 1.0;
 
+  // Run the prediction and throw the answer away: nothing is evicted and
+  // nothing is warmed. This separates what inference costs the thread it
+  // runs on from what its selection does to the cache. On LevelDB's single
+  // background thread, 25,000 candidate ranges at ~5 us each spent 72% of a
+  // run inside inference and compaction fell to a third of its rate; the dry
+  // run showed that this throttling alone was worth +1pp of hit ratio, and
+  // the other +10pp of Leaper's margin was the prefetching
+  // (docs/M9-journal-prep.md, section 2).
+  bool dry_run = false;
+
+  // Memoise predictions within one wall-clock second. Every feature of a
+  // range -- the completed slots' rates, the precursors' rates, the hour,
+  // minute and second -- is constant inside a second, so two jobs that begin
+  // in the same second and ask for the same step range get the same answer
+  // and only the first pays for it. LevelDB starts about ten jobs a second on
+  // the ZippyDB model, each over 25,000 ranges; without this the single
+  // background thread spent 72% of the run repeating the same predictions.
+  bool memoize_predictions = true;
+
   // Phase 1 (eviction) and phase 2 (prefetch) can be enabled separately. The
   // two do very different things -- one gives cache back, the other spends it
   // -- and attributing a combined result to "Leaper" without knowing which
@@ -193,6 +212,7 @@ struct CompactionInfo {
 struct Stats {
   uint64_t reads_seen = 0, writes_seen = 0, sampled = 0;
   uint64_t inferences = 0, inference_us = 0;
+  uint64_t memo_hits = 0;   // predictions answered from the per-second memo
   uint64_t ranges_predicted_hot = 0, ranges_predicted_cold = 0;
   uint64_t blocks_prefetched = 0, blocks_evicted = 0;
   uint64_t overlap_checks = 0, overlap_us = 0;
