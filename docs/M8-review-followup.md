@@ -1209,3 +1209,41 @@ defects, one of which (16) broke the build for anyone but the author; the
 measurements they touched change by less than the noise floor everywhere
 except one table, where a baseline's advantage was an artefact and is gone.
 The README's headline numbers are replaced by the `_v4` rows above.
+
+**Follow-up review, 2026-09-20.** A second review of the fixes
+([`docs/code-review-followup-2026-09-20.md`](code-review-followup-2026-09-20.md))
+passed six of the seven and found two residuals: the RocksDB warm budget was
+still checked only between ranges, so one range could read a whole file past
+it, and a job's End popped the core's job context outside the adapter mutex
+under which another job's Begin runs its predict-and-choose sequence, so a
+concurrent job could finish choosing against a stale hot set. Both are fixed
+(per-key budget check, measured overshoot at most one block; End takes the
+mutex for the pop). Two sentences in this document were also wrong and are
+corrected above: Leaper's tail latency on the IM-at-8m-rows run is a third
+of warming everything's, not the lowest of the four policies, and the
+calibration fix *did* change the prediction horizon, from one step to one
+or two.
+
+Because the second residual could have interrupted a job's choosing on the
+v4 RocksDB runs, the three RocksDB configurations were re-run with it fixed
+(`_v5` tags; quiet machine, load about 1):
+
+| | stock | `kFlushOnly` | `kFlushAndCompaction` | Leaper, block-level |
+|---|---|---|---|---|
+| paper scale, lifecycle 60 s | 90.12% | +1.40pp (0.00) | +1.28pp (-0.01) | **+1.55pp** (-0.01) |
+| IM shape on a 10 GB table | 54.54% | +1.88pp (+0.05) | +6.52pp (+0.03) | **+8.71pp** (+0.35) |
+| IM at its own 8m-row size | 70.18% | +8.21pp (+0.04) | **+19.13pp** (+0.02) | +15.39pp (+0.04) |
+
+Unchanged. The one row that moved, Leaper on the IM shape, moved up by
+0.35pp — the direction the race would have cost it, and the size of the
+run-to-run variation on that configuration. The RocksDB conclusions stand.
+
+One more thing this re-run shows: **tail latency is not a repeatable
+quantity on these RocksDB runs.** The mean per-second p99 on the IM-at-8m
+configuration was 28 / 28 / 100 / 36 us (stock, flush-only, warm-everything,
+Leaper) on the v4 run and 31 / 60 / 29 / 29 us on the v5 run of the same
+binary, seed and configuration. Whichever policy happens to be warming when
+a background job stalls the foreground takes the hit. This document's
+earlier statements about tail-latency ordering on RocksDB, including the
+corrected one in H18, should be read as observations about single runs;
+the README no longer makes one.

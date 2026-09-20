@@ -186,9 +186,9 @@ table is relative to the cache. The instant-messaging shape over a table
 larger than the cache is where selection wins by the largest margin measured
 on RocksDB, +8.36pp against warming everything's +6.49pp. At that table's own
 8m-row size, where it fits in the cache, warming everything wins instead,
-+19.11pp against +15.35pp, and at a third of warming everything's tail
-latency (mean per-second p99 36 us against 100; stock and flush-only sit at
-28). The
++19.11pp against +15.35pp. (Tail latency is not repeatable across runs of
+this configuration — the same policy's mean per-second p99 varied threefold
+between two identical runs — so no ordering is claimed for it.) The
 read-heavy e-commerce shape leaves nothing to select at all.
 
 ## Layout
