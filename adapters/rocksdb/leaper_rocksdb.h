@@ -39,6 +39,7 @@
 
 namespace rocksdb {
 class Comparator;
+class PrepopulateBlockFilter;
 class TableFactory;
 }  // namespace rocksdb
 
@@ -58,6 +59,14 @@ struct AdapterOptions {
   //               keys. Reads the current version of every key in the range
   //               through every level, so most of what it pulls in is older
   //               blocks that were not touched by the job.
+  //   "prepop":   do not read anything back. RocksDB's own prepopulate path
+  //               (BlockBasedTableOptions::prepopulate_block_cache, patched
+  //               to consult prepopulate_block_filter) inserts each output
+  //               block from memory as the builder produces it, and this
+  //               adapter's filter says yes only for blocks inside a
+  //               predicted-hot range of the job. Zero extra I/O: the same
+  //               mechanism and cost as kFlushAndCompaction, with selection.
+  //               Needs the RocksDB patch in adapters/rocksdb/.
   //   "sst":      open each output file of the job with an SstFileReader that
   //               shares the DB's table factory (hence its block cache; the
   //               cache key is derived from the file's own properties, see
@@ -80,6 +89,10 @@ class Adapter {
 
   // Install before opening the DB, then hand the DB back.
   std::shared_ptr<rocksdb::EventListener> listener();
+  // For warm_mode "prepop": install this as
+  // BlockBasedTableOptions::prepopulate_block_filter before opening the DB.
+  std::shared_ptr<rocksdb::PrepopulateBlockFilter> prepopulate_filter();
+  uint64_t prepop_rejected() const { return prepop_rejected_; }
   // Required for warm_mode "sst": the DB's own table factory (so the reader
   // shares its block cache) and comparator.
   void SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
@@ -123,6 +136,9 @@ class Adapter {
   const rocksdb::Comparator* comparator_ = nullptr;
   uint64_t warmed_blocks_ = 0, warm_files_ = 0, warm_open_failed_ = 0;
   uint64_t warm_block_budget_ = 0, warm_budget_stops_ = 0;
+  uint64_t prepop_rejected_ = 0;
+  class PrepopFilter;
+  std::shared_ptr<PrepopFilter> prepop_filter_;
   void WarmFromFiles(const std::vector<std::string>& outputs,
                      const std::vector<leaper::BlockRef>& ranges,
                      uint64_t budget_blocks);

@@ -32,6 +32,9 @@ target_include_directories(leaper_leveldb PUBLIC adapters/leveldb)
 target_link_libraries(leaper_leveldb PUBLIC leaper_core leveldb)
 target_compile_options(leaper_leveldb PRIVATE ${LEAPER_NO_RTTI})
 
+add_executable(mixgraph_check bench/src/mixgraph_check.cc)
+target_include_directories(mixgraph_check PRIVATE bench/include)
+
 add_executable(leaper_bench bench/src/leaper_bench.cc)
 target_include_directories(leaper_bench PRIVATE bench/include leaper/include)
 target_compile_options(leaper_bench PRIVATE ${LEAPER_NO_RTTI})

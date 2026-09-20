@@ -1,0 +1,103 @@
+diff --git a/include/rocksdb/table.h b/include/rocksdb/table.h
+index 293cbc0d2..949e6e328 100644
+--- a/include/rocksdb/table.h
++++ b/include/rocksdb/table.h
+@@ -27,6 +27,7 @@
+ #include "rocksdb/customizable.h"
+ #include "rocksdb/env.h"
+ #include "rocksdb/options.h"
++#include "rocksdb/types.h"
+ #include "rocksdb/status.h"
+ 
+ namespace ROCKSDB_NAMESPACE {
+@@ -215,6 +216,15 @@ struct CacheUsageOptions {
+ //                  "{prepopulate_block_cache=kFlushOnly;}"}}));
+ // db->SetOptions({{"block_based_table_factory",
+ //                  "{filter_policy=ribbonfilter:10;}"}});
++class PrepopulateBlockFilter {
++ public:
++  virtual ~PrepopulateBlockFilter() {}
++  // |reason| is kFlush or kCompaction; the keys are internal keys.
++  virtual bool ShouldWarm(TableFileCreationReason reason,
++                          const Slice& first_internal_key,
++                          const Slice& last_internal_key) = 0;
++};
++
+ struct BlockBasedTableOptions {
+   static const char* kName() { return "BlockTableOptions"; }
+   // @flush_block_policy_factory creates the instances of flush block policy.
+@@ -886,6 +896,20 @@ struct BlockBasedTableOptions {
+   PrepopulateBlockCache prepopulate_block_cache =
+       PrepopulateBlockCache::kDisable;
+ 
++  // Optional filter that makes prepopulate_block_cache selective. When set,
++  // it is consulted once per data block that prepopulate_block_cache would
++  // warm, on the thread building the table, with the block's first and last
++  // internal keys; returning false leaves that block out of the cache. Meta
++  // blocks (index, filter) are never filtered. Only the synchronous write
++  // path is filtered: with parallel compression the keys of a block are not
++  // available at insertion time and every block is warmed as before.
++  //
++  // Added for Leaper (a learned prefetcher for cache invalidation): the
++  // prefetcher predicts which key ranges will be read after a flush or
++  // compaction and warms only the output blocks in those ranges, from
++  // memory, at the moment the builder produces them -- the paper's design.
++  std::shared_ptr<PrepopulateBlockFilter> prepopulate_block_filter;
++
+   // RocksDB does auto-readahead for iterators on noticing more than two reads
+   // for a table file if user doesn't provide readahead_size. The readahead size
+   // starts at initial_auto_readahead_size and doubles on every additional read
+diff --git a/table/block_based/block_based_table_builder.cc b/table/block_based/block_based_table_builder.cc
+index 7afa64310..d4373a52d 100644
+--- a/table/block_based/block_based_table_builder.cc
++++ b/table/block_based/block_based_table_builder.cc
+@@ -858,6 +858,11 @@ struct BlockBasedTableBuilder::Rep {
+   PartitionedIndexBuilder* p_index_builder_ = nullptr;
+ 
+   std::string last_ikey;  // Internal key or empty (unset)
++  // For BlockBasedTableOptions::prepopulate_block_filter: first internal key
++  // of the data block being built, and the last key of the data block being
++  // written (set only around the synchronous EmitBlock -> WriteBlock path).
++  std::string first_ikey_in_block;
++  Slice warm_last_ikey;
+   bool uses_explicit_compression_manager = false;
+ 
+   uint64_t sample_for_compression;
+@@ -1670,6 +1675,9 @@ void BlockBasedTableBuilder::Add(const Slice& ikey, const Slice& value) {
+     }
+ 
+     // NOTE: WriteBatch guarantees keys < 4GB; value size checked above
++    if (r->data_block.empty()) {
++      r->first_ikey_in_block.assign(entry_ikey.data(), entry_ikey.size());
++    }
+     r->data_block.AddWithLastKey(entry_ikey, entry_value, r->last_ikey);
+     r->last_ikey.assign(entry_ikey.data(), entry_ikey.size());
+     assert(!r->last_ikey.empty());
+@@ -1896,8 +1904,10 @@ void BlockBasedTableBuilder::EmitBlock(std::string& uncompressed,
+   // When data blocks are aligned with super block alignment, delta encoding
+   // needs to be skipped for the first block after padding.
+   bool skip_delta_encoding = false;
++  r->warm_last_ikey = last_key_in_current_block;
+   WriteBlock(uncompressed, &r->pending_handle, BlockType::kData,
+              &skip_delta_encoding);
++  r->warm_last_ikey = Slice();
+   if (LIKELY(ok())) {
+     // We do not emit the index entry for a block until we have seen the
+     // first key for the next data block.  This allows us to use shorter
+@@ -2277,7 +2287,15 @@ IOStatus BlockBasedTableBuilder::WriteMaybeCompressedBlockImpl(
+     }
+   }
+ 
+-  if (r->warm_cache_config.enabled) {
++  bool warm = r->warm_cache_config.enabled;
++  if (warm && block_type == BlockType::kData) {
++    const auto& filter = r->table_options.prepopulate_block_filter;
++    if (filter && !r->warm_last_ikey.empty()) {
++      warm = filter->ShouldWarm(r->reason, Slice(r->first_ikey_in_block),
++                                r->warm_last_ikey);
++    }
++  }
++  if (warm) {
+     io_s = status_to_io_status(
+         InsertBlockInCacheHelper(*uncompressed_block_data, handle, block_type));
+     if (UNLIKELY(!io_s.ok())) {

@@ -24,6 +24,19 @@ echo "==> build (LevelDB half)"
 echo "    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release"
 echo "    cmake --build build -j"
 echo
+echo "==> RocksDB patch (optional; only warm_mode=prepop needs it)"
+RPATCH=adapters/rocksdb/rocksdb-11.8-prepopulate-filter.patch
+if [ -d third_party/rocksdb/.git ] || [ -f third_party/rocksdb/.git ]; then
+  if git -C third_party/rocksdb apply --check --reverse "../../$RPATCH" 2>/dev/null; then
+    echo "    already applied"
+  elif git -C third_party/rocksdb apply --check "../../$RPATCH" 2>/dev/null; then
+    git -C third_party/rocksdb apply "../../$RPATCH"
+    echo "    applied ($(grep -c '^+++' "$RPATCH") files)"
+  else
+    echo "    submodule not checked out yet; re-run setup.sh after 'git submodule update --init third_party/rocksdb'"
+  fi
+fi
+echo
 echo "==> build (RocksDB half, optional; takes a while)"
 echo "    git submodule update --init third_party/rocksdb"
 echo "    cmake -S third_party/rocksdb -B build-rocksdb -G Ninja -DCMAKE_BUILD_TYPE=Release \\"

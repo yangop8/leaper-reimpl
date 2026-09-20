@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -58,6 +59,13 @@ struct Flags {
   double read_ratio = 0.75;
   double update_ratio = 0.20;
   double zipf = 0.99;
+  // FAST'20 mixgraph (ZippyDB) model; see keygen.h. sine_a > 0 modulates
+  // op_rate as op_rate * (1 + (sine_a/sine_d) * sin(sine_b * t_us)), the
+  // paper's QPS wave (period 2*pi/sine_b = 86 s at the default).
+  int mix_keyrange_num = 30;
+  double mix_keyrange_a = 14.18, mix_keyrange_b = -2.917, mix_keyrange_c = 0.0164, mix_keyrange_d = -0.08082;
+  double mix_key_a = 0.002312, mix_key_b = 0.3467;
+  double sine_a = 0.0, sine_b = 0.000073, sine_d = 4500.0;
   std::string key_dist = "lifecycle";
   double hotspot = 0.0;
   uint64_t life_range_size = 40000;
@@ -154,6 +162,16 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "read_ratio", &v)) flags.read_ratio = ParseDouble("read_ratio", v);
     else if (ParseFlag(a, "update_ratio", &v)) flags.update_ratio = ParseDouble("update_ratio", v);
     else if (ParseFlag(a, "zipf", &v)) flags.zipf = ParseDouble("zipf", v);
+    else if (ParseFlag(a, "mix_keyrange_num", &v)) flags.mix_keyrange_num = ParseInt("mix_keyrange_num", v);
+    else if (ParseFlag(a, "mix_keyrange_a", &v)) flags.mix_keyrange_a = ParseDouble("mix_keyrange_a", v);
+    else if (ParseFlag(a, "mix_keyrange_b", &v)) flags.mix_keyrange_b = ParseDouble("mix_keyrange_b", v);
+    else if (ParseFlag(a, "mix_keyrange_c", &v)) flags.mix_keyrange_c = ParseDouble("mix_keyrange_c", v);
+    else if (ParseFlag(a, "mix_keyrange_d", &v)) flags.mix_keyrange_d = ParseDouble("mix_keyrange_d", v);
+    else if (ParseFlag(a, "mix_key_a", &v)) flags.mix_key_a = ParseDouble("mix_key_a", v);
+    else if (ParseFlag(a, "mix_key_b", &v)) flags.mix_key_b = ParseDouble("mix_key_b", v);
+    else if (ParseFlag(a, "sine_a", &v)) flags.sine_a = ParseDouble("sine_a", v);
+    else if (ParseFlag(a, "sine_b", &v)) flags.sine_b = ParseDouble("sine_b", v);
+    else if (ParseFlag(a, "sine_d", &v)) flags.sine_d = ParseDouble("sine_d", v);
     else if (ParseFlag(a, "key_dist", &v)) flags.key_dist = v;
     else if (ParseFlag(a, "hotspot", &v)) flags.hotspot = ParseDouble("hotspot", v);
     else if (ParseFlag(a, "life_range_size", &v)) flags.life_range_size = ParseU64("life_range_size", v);
@@ -193,6 +211,7 @@ KeyDist ParseKeyDist(const std::string& s) {
   if (s == "uniform") return KeyDist::kUniform;
   if (s == "scrambled") return KeyDist::kScrambled;
   if (s == "lifecycle") return KeyDist::kLifecycle;
+  if (s == "mixgraph") return KeyDist::kMixgraph;
   return KeyDist::kZipfContiguous;
 }
 
@@ -245,8 +264,13 @@ void WorkerLoop(Shared* s, int tid) {
   life.chain = flags.life_chain;
   life.chain_lag = flags.life_chain_lag;
   life.seed = flags.seed;
+  Mixgraph mix;
+  mix.keyrange_num = flags.mix_keyrange_num;
+  mix.keyrange_a = flags.mix_keyrange_a; mix.keyrange_b = flags.mix_keyrange_b;
+  mix.keyrange_c = flags.mix_keyrange_c; mix.keyrange_d = flags.mix_keyrange_d;
+  mix.key_a = flags.mix_key_a; mix.key_b = flags.mix_key_b;
   KeyChooser chooser(flags.num, ParseKeyDist(flags.key_dist), flags.zipf,
-                     flags.hotspot, dyn, life);
+                     flags.hotspot, dyn, life, mix);
   Histogram* rh = s->read_hist[tid];
   Histogram* wh = s->write_hist[tid];
   TraceWriter* tw = s->trace.empty() ? nullptr : s->trace[tid];
@@ -261,7 +285,13 @@ void WorkerLoop(Shared* s, int tid) {
     uint64_t t0 = NowUs();
     if (flags.op_rate > 0.0) {
       const double elapsed = (t0 - s->run_start_us) / 1e6;
-      const uint64_t budget = static_cast<uint64_t>(flags.op_rate * elapsed) + 1;
+      double allowed = flags.op_rate * elapsed;
+      if (flags.sine_a > 0.0 && flags.sine_d > 0.0 && flags.sine_b > 0.0) {
+        // Integral of op_rate * (1 + (a/d) sin(b' t)) with b' in rad/s.
+        const double bs = flags.sine_b * 1e6;
+        allowed = flags.op_rate * (elapsed + (flags.sine_a / flags.sine_d) * (1.0 - std::cos(bs * elapsed)) / bs);
+      }
+      const uint64_t budget = static_cast<uint64_t>(allowed) + 1;
       if (s->ops_issued.load(std::memory_order_relaxed) >= budget) {
         std::this_thread::sleep_for(std::chrono::microseconds(200));
         continue;
@@ -389,6 +419,13 @@ int Run() {
   bbt.block_size = static_cast<size_t>(flags.block_kb) * 1024;
   bbt.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, false));
   bbt.cache_index_and_filter_blocks = false;
+  if (adapter != nullptr && flags.warm_mode == "prepop") {
+    // Leaper through RocksDB's own prepopulate path, made selective by the
+    // patch in adapters/rocksdb/: same zero-I/O warming as kFlushAndCompaction.
+    bbt.prepopulate_block_cache =
+        rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushAndCompaction;
+    bbt.prepopulate_block_filter = adapter->prepopulate_filter();
+  }
   if (flags.policy == "flush_only") {
     bbt.prepopulate_block_cache =
         rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
@@ -572,12 +609,14 @@ int Run() {
         "[leaper] reads_seen=%" PRIu64 " inferences=%" PRIu64 " (%.2f us/inf) "
         "hot=%" PRIu64 " warmed_ranges=%" PRIu64 " warm_us=%" PRIu64
         " warm_mode=%s warmed_blocks=%" PRIu64 " warm_files=%" PRIu64
-        " warm_open_failed=%" PRIu64 " warm_budget_stops=%" PRIu64 "\n",
+        " warm_open_failed=%" PRIu64 " warm_budget_stops=%" PRIu64
+        " prepop_rejected=%" PRIu64 "\n",
         ls.reads_seen, ls.inferences,
         ls.inferences ? static_cast<double>(ls.inference_us) / ls.inferences : 0.0,
         ls.ranges_predicted_hot, adapter->warmed_ranges(), adapter->warm_us(),
         flags.warm_mode.c_str(), adapter->warmed_blocks(), adapter->warm_files(),
-        adapter->warm_open_failed(), adapter->warm_budget_stops());
+        adapter->warm_open_failed(), adapter->warm_budget_stops(),
+        adapter->prepop_rejected());
   }
   for (auto* h : shared.read_hist) delete h;
   for (auto* h : shared.write_hist) delete h;

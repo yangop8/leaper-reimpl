@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -61,6 +62,13 @@ struct Flags {
   double scan_ratio = 0.0;      // share of *read* operations that are scans
   int scan_len = 32;
   double zipf = 0.99;
+  // FAST'20 mixgraph (ZippyDB) model; see keygen.h. sine_a > 0 modulates
+  // op_rate as op_rate * (1 + (sine_a/sine_d) * sin(sine_b * t_us)), the
+  // paper's QPS wave (period 2*pi/sine_b = 86 s at the default).
+  int mix_keyrange_num = 30;
+  double mix_keyrange_a = 14.18, mix_keyrange_b = -2.917, mix_keyrange_c = 0.0164, mix_keyrange_d = -0.08082;
+  double mix_key_a = 0.002312, mix_key_b = 0.3467;
+  double sine_a = 0.0, sine_b = 0.000073, sine_d = 4500.0;
   double write_rate = 0.0;      // target writes/sec across all threads; 0 = closed loop
   double op_rate = 0.0;         // target total ops/sec across all threads; 0 = unthrottled
   int read_delay_us = 0;        // emulated device latency per block read
@@ -197,6 +205,16 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "scan_ratio", &v)) flags.scan_ratio = ParseDouble("scan_ratio", v);
     else if (ParseFlag(a, "scan_len", &v)) flags.scan_len = ParseInt("scan_len", v);
     else if (ParseFlag(a, "zipf", &v)) flags.zipf = ParseDouble("zipf", v);
+    else if (ParseFlag(a, "mix_keyrange_num", &v)) flags.mix_keyrange_num = ParseInt("mix_keyrange_num", v);
+    else if (ParseFlag(a, "mix_keyrange_a", &v)) flags.mix_keyrange_a = ParseDouble("mix_keyrange_a", v);
+    else if (ParseFlag(a, "mix_keyrange_b", &v)) flags.mix_keyrange_b = ParseDouble("mix_keyrange_b", v);
+    else if (ParseFlag(a, "mix_keyrange_c", &v)) flags.mix_keyrange_c = ParseDouble("mix_keyrange_c", v);
+    else if (ParseFlag(a, "mix_keyrange_d", &v)) flags.mix_keyrange_d = ParseDouble("mix_keyrange_d", v);
+    else if (ParseFlag(a, "mix_key_a", &v)) flags.mix_key_a = ParseDouble("mix_key_a", v);
+    else if (ParseFlag(a, "mix_key_b", &v)) flags.mix_key_b = ParseDouble("mix_key_b", v);
+    else if (ParseFlag(a, "sine_a", &v)) flags.sine_a = ParseDouble("sine_a", v);
+    else if (ParseFlag(a, "sine_b", &v)) flags.sine_b = ParseDouble("sine_b", v);
+    else if (ParseFlag(a, "sine_d", &v)) flags.sine_d = ParseDouble("sine_d", v);
     else if (ParseFlag(a, "write_rate", &v)) flags.write_rate = ParseDouble("write_rate", v);
     else if (ParseFlag(a, "op_rate", &v)) flags.op_rate = ParseDouble("op_rate", v);
     else if (ParseFlag(a, "read_delay_us", &v)) flags.read_delay_us = ParseInt("read_delay_us", v);
@@ -258,6 +276,7 @@ KeyDist ParseKeyDist(const std::string& s) {
   if (s == "uniform") return KeyDist::kUniform;
   if (s == "scrambled") return KeyDist::kScrambled;
   if (s == "lifecycle") return KeyDist::kLifecycle;
+  if (s == "mixgraph") return KeyDist::kMixgraph;
   return KeyDist::kZipfContiguous;
 }
 
@@ -306,8 +325,13 @@ void WorkerLoop(Shared* s, int tid) {
   life.chain = flags.life_chain;
   life.chain_lag = flags.life_chain_lag;
   life.seed = flags.seed;
+  Mixgraph mix;
+  mix.keyrange_num = flags.mix_keyrange_num;
+  mix.keyrange_a = flags.mix_keyrange_a; mix.keyrange_b = flags.mix_keyrange_b;
+  mix.keyrange_c = flags.mix_keyrange_c; mix.keyrange_d = flags.mix_keyrange_d;
+  mix.key_a = flags.mix_key_a; mix.key_b = flags.mix_key_b;
   KeyChooser chooser(flags.num, ParseKeyDist(flags.key_dist), flags.zipf,
-                     flags.hotspot, dyn, life);
+                     flags.hotspot, dyn, life, mix);
   // Independent hot set for the decorrelated share of writes.
   Lifecycle wlife = life;
   wlife.seed = life.seed ^ 0x5DEECE66DULL;
@@ -335,7 +359,13 @@ void WorkerLoop(Shared* s, int tid) {
 
     if (flags.op_rate > 0.0) {
       const double elapsed = (t0 - s->run_start_us) / 1e6;
-      const uint64_t budget = static_cast<uint64_t>(flags.op_rate * elapsed) + 1;
+      double allowed = flags.op_rate * elapsed;
+      if (flags.sine_a > 0.0 && flags.sine_d > 0.0 && flags.sine_b > 0.0) {
+        // Integral of op_rate * (1 + (a/d) sin(b' t)) with b' in rad/s.
+        const double bs = flags.sine_b * 1e6;
+        allowed = flags.op_rate * (elapsed + (flags.sine_a / flags.sine_d) * (1.0 - std::cos(bs * elapsed)) / bs);
+      }
+      const uint64_t budget = static_cast<uint64_t>(allowed) + 1;
       if (s->ops_issued.load(std::memory_order_relaxed) >= budget) {
         env->SleepForMicroseconds(200);
         continue;

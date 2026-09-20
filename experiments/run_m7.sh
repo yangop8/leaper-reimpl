@@ -41,6 +41,7 @@ WORKLOAD=(
   --life_lifetime_s=${LIFETIME_S:-8} --life_ramp_frac=0.25 --life_chain=4 --life_chain_lag=0.2
   --threads=4 --read_ratio=${READ_RATIO:-0.75} --update_ratio=${UPDATE_RATIO:-0.20}
   --op_rate=${OP_RATE:-40000} --write_rate=${WRITE_RATE:-4000}
+  --sine_a=${SINE_A:-0} --sine_d=${SINE_D:-4500}
   --duration="$DUR" --warmup=$WARMUP
 )
 
@@ -63,7 +64,7 @@ BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${TAG}.calibration.txt" | cut -
 echo "calibrated alpha=$ALPHA beta=$BETA"
 
 echo "=== 3/3 policy matrix (seed 1234) ==="
-for POL in ${POLICIES:-off flush_only flush_and_compaction leaper sst_leaper leaper_rowcache}; do
+for POL in ${POLICIES:-off flush_only flush_and_compaction leaper sst_leaper prepop_leaper leaper_rowcache}; do
   echo "--- $POL ---"
   EXTRA=()
   RUNPOL="$POL"
@@ -82,6 +83,17 @@ for POL in ${POLICIES:-off flush_only flush_and_compaction leaper sst_leaper lea
              --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
              --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA"
              --warm_mode=sst) ;;
+    prepop_leaper)
+      # Leaper through RocksDB's own prepopulate path (needs the RocksDB
+      # patch): each output block is inserted from memory as the builder
+      # writes it, iff it lies in a predicted-hot range. Same cost as
+      # kFlushAndCompaction, with selection.
+      RUNPOL=leaper
+      EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
+             --precursors="$OUT/${TAG}.model.precursors.txt"
+             --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
+             --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA"
+             --warm_mode=prepop) ;;
     leaper_rowcache)
       # The paper's rows go to a KV cache; RocksDB has one. Same block cache
       # budget plus a 32 MB row cache, to see whether the prefetcher's

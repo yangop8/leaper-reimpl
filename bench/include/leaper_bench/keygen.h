@@ -54,7 +54,100 @@ class ZipfianRank {
   double theta_, zetan_, zeta2_, alpha_, eta_;
 };
 
-enum class KeyDist { kZipfContiguous, kScrambled, kUniform, kLifecycle };
+enum class KeyDist { kZipfContiguous, kScrambled, kUniform, kLifecycle, kMixgraph };
+
+// The FAST'20 "mixgraph" model (Cao et al., "Characterizing, Modeling, and
+// Benchmarking RocksDB Key-Value Workloads at Facebook"): the model Facebook
+// fitted to its production ZippyDB traces and shipped in db_bench, since the
+// traces themselves were not released ("We are not releasing the trace at
+// this time", Section 8). Two levels of locality: the key space is cut into
+// |keyrange_num| equal key ranges whose access probability follows a
+// two-term exponential f(x) = a e^{bx} + c e^{dx} (the "prefix" or key-range
+// hotness), and within the chosen range the key is picked by a power law
+// y = a' x^{b'} over a seed that is then hashed to an offset, so hot keys are
+// scattered inside a hot range. Defaults are the paper's Prefix_dist
+// parameters for ZippyDB. This is a port of db_bench's GenerateTwoTermExpKeys
+// with a different hash for the seed-to-offset step, so key identities differ
+// from db_bench's but the distribution's shape is the same.
+struct Mixgraph {
+  int keyrange_num = 30;
+  double keyrange_a = 14.18, keyrange_b = -2.917;
+  double keyrange_c = 0.0164, keyrange_d = -0.08082;
+  double key_a = 0.002312, key_b = 0.3467;
+};
+
+class MixgraphChooser {
+ public:
+  MixgraphChooser(uint64_t n, Mixgraph cfg) : n_(n), cfg_(cfg) {
+    num_ = cfg.keyrange_num > 0 ? cfg.keyrange_num : 1;
+    size_ = n / static_cast<uint64_t>(num_);
+    if (size_ == 0) size_ = 1;
+    // db_bench's InitiateExpDistribution: each range gets an integer share
+    // proportional to its probability, ranges are shuffled deterministically
+    // so the hot ones are not all at one end of the key space.
+    uint64_t amplify = 0, start = 0;
+    for (int pfx = num_; pfx >= 1; --pfx) {
+      double p = cfg.keyrange_a * std::exp(cfg.keyrange_b * pfx) +
+                 cfg.keyrange_c * std::exp(cfg.keyrange_d * pfx);
+      if (p < 1e-16) p = 0.0;
+      if (amplify == 0 && p > 0.0) amplify = static_cast<uint64_t>(std::floor(1.0 / p)) + 1;
+      Unit u;
+      u.start = start;
+      u.access = p <= 0.0 ? 0 : static_cast<uint64_t>(std::floor(amplify * p));
+      units_.push_back(u);
+      start += u.access;
+    }
+    rand_max_ = start > 0 ? start : 1;
+    uint64_t s = rand_max_;
+    for (int i = 0; i < num_; ++i) {
+      s = SplitMix(s);
+      std::swap(units_[i], units_[s % static_cast<uint64_t>(num_)]);
+    }
+    uint64_t off = 0;
+    for (Unit& u : units_) { u.start = off; off += u.access; }
+  }
+
+  uint64_t Next(std::mt19937_64* rng) const {
+    const uint64_t ini = (*rng)();
+    const uint64_t kr = ini % rand_max_;
+    size_t lo = 0, hi = units_.size();
+    while (lo + 1 < hi) {
+      const size_t mid = lo + (hi - lo) / 2;
+      if (kr < units_[mid].start) hi = mid; else lo = mid;
+    }
+    uint64_t offset;
+    if (cfg_.key_a == 0.0 || cfg_.key_b == 0.0) {
+      offset = ini % size_;
+    } else {
+      const double u = static_cast<double>(ini % size_) / static_cast<double>(size_);
+      const uint64_t seed = static_cast<uint64_t>(
+          std::ceil(std::pow(u / cfg_.key_a, 1.0 / cfg_.key_b)));
+      offset = SplitMix(seed) % size_;
+    }
+    return (size_ * static_cast<uint64_t>(lo) + offset) % n_;
+  }
+
+  // Share of accesses each key range receives, in key-space order.
+  std::vector<double> RangeShares() const {
+    std::vector<double> v;
+    for (const Unit& u : units_) v.push_back(static_cast<double>(u.access) / rand_max_);
+    return v;
+  }
+  uint64_t range_keys() const { return size_; }
+
+ private:
+  struct Unit { uint64_t start = 0, access = 0; };
+  static uint64_t SplitMix(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+  }
+  uint64_t n_, size_ = 1, rand_max_ = 1;
+  int num_ = 1;
+  Mixgraph cfg_;
+  std::vector<Unit> units_;
+};
 
 // Workload dynamics.
 //
@@ -212,10 +305,11 @@ class LifecycleChooser {
 class KeyChooser {
  public:
   KeyChooser(uint64_t n, KeyDist dist, double theta, double hotspot_frac,
-             Dynamics dyn = Dynamics(), Lifecycle life = Lifecycle())
+             Dynamics dyn = Dynamics(), Lifecycle life = Lifecycle(),
+             Mixgraph mix = Mixgraph())
       : n_(n), dist_(dist), zipf_(n, theta > 0.0 ? theta : 1e-6),
         hotspot_(static_cast<uint64_t>(hotspot_frac * static_cast<double>(n))),
-        dyn_(dyn), lifecycle_(n, life) {}
+        dyn_(dyn), lifecycle_(n, life), mixgraph_(n, mix) {}
 
   // |elapsed_s| is seconds since the run started; it drives the dynamics.
   uint64_t Next(std::mt19937_64* rng, double elapsed_s = 0.0) const {
@@ -228,6 +322,8 @@ class KeyChooser {
       }
       case KeyDist::kLifecycle:
         return lifecycle_.Next(rng, elapsed_s);
+      case KeyDist::kMixgraph:
+        return mixgraph_.Next(rng);
       case KeyDist::kZipfContiguous:
       default:
         return (Origin(elapsed_s) + zipf_.Next(rng)) % n_;
@@ -265,6 +361,7 @@ class KeyChooser {
   uint64_t hotspot_;
   Dynamics dyn_;
   LifecycleChooser lifecycle_;
+  MixgraphChooser mixgraph_;
 };
 
 // 16-byte zero-padded decimal: lexicographic order == numeric order, so the

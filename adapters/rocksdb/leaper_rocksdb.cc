@@ -3,6 +3,7 @@
 #include "leaper_rocksdb.h"
 
 #include "rocksdb/comparator.h"
+#include "rocksdb/table.h"
 #include "rocksdb/perf_context.h"
 #include "rocksdb/perf_level.h"
 #include "rocksdb/sst_file_reader.h"
@@ -40,6 +41,52 @@ uint64_t MonotonicUs() {
 // (the core interface is engine-neutral), and End and Prefetch always run on
 // the same background thread, so a thread-local is the honest channel.
 static thread_local uint64_t tl_warm_budget_left = 0;
+
+// For warm_mode "prepop". RocksDB fires OnFlushBegin / OnCompactionBegin on
+// the thread that then builds the job's output tables (with subcompactions
+// disabled, which the harness leaves at their default), so the ranges chosen
+// at Begin are handed to the builder's filter through a thread-local rather
+// than through a job id the builder does not have. Sorted range ids, plus
+// how many blocks this job may still warm (0 = unlimited).
+struct PrepopJob {
+  std::vector<leaper::RangeId> hot;
+  uint64_t budget_left = 0;
+  bool active = false;
+};
+static thread_local PrepopJob tl_prepop_job;
+
+// The filter RocksDB's patched builder consults for every data block it is
+// about to warm: yes iff the block's key span overlaps a chosen range of the
+// job running on this thread, and the job's budget is not spent.
+class Adapter::PrepopFilter : public rocksdb::PrepopulateBlockFilter {
+ public:
+  explicit PrepopFilter(Adapter* a) : a_(a) {}
+  bool ShouldWarm(rocksdb::TableFileCreationReason,
+                  const rocksdb::Slice& first_ikey,
+                  const rocksdb::Slice& last_ikey) override {
+    PrepopJob& job = tl_prepop_job;
+    if (!job.active || job.hot.empty()) return Reject();
+    if (job.budget_left == 0 && a_->warm_block_budget_ != 0) return Reject();
+    // Internal key = user key + 8-byte trailer.
+    if (first_ikey.size() < 8 || last_ikey.size() < 8) return Reject();
+    leaper::RangeId lo = a_->mapper_->Map(first_ikey.data(), first_ikey.size() - 8);
+    leaper::RangeId hi = a_->mapper_->Map(last_ikey.data(), last_ikey.size() - 8);
+    if (hi < lo) std::swap(lo, hi);
+    auto it = std::lower_bound(job.hot.begin(), job.hot.end(), lo);
+    if (it == job.hot.end() || *it > hi) return Reject();
+    if (a_->warm_block_budget_ != 0) --job.budget_left;
+    std::lock_guard<std::mutex> lock(a_->mu_);
+    ++a_->warmed_blocks_;
+    return true;
+  }
+ private:
+  bool Reject() {
+    std::lock_guard<std::mutex> lock(a_->mu_);
+    ++a_->prepop_rejected_;
+    return false;
+  }
+  Adapter* a_;
+};
 
 class Adapter::CacheBridge : public leaper::CacheOps {
  public:
@@ -168,6 +215,16 @@ void Adapter::Listener::Begin(int job_id, int level, bool is_flush, uint64_t,
   for (const leaper::BlockRef& b : candidates) {
     if (a_->core_->ShouldPrefetch(b, a_->NowUs())) chosen.push_back(b);
   }
+  if (a_->warm_mode_ == "prepop") {
+    PrepopJob& job = tl_prepop_job;
+    job.hot.clear();
+    for (const leaper::BlockRef& b : chosen) job.hot.push_back(b.first_range);
+    std::sort(job.hot.begin(), job.hot.end());
+    job.budget_left = a_->warm_block_budget_;
+    job.active = true;
+    a_->warmed_ += chosen.size();
+    return;  // nothing to do at End: the builder warms as it writes
+  }
   a_->pending_by_job_[job_id] = std::move(chosen);
 }
 
@@ -192,7 +249,10 @@ void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs)
   // made only before the first read let the sst mode read a whole file's
   // worth past a budget of one block.
   const uint64_t budget = a_->warm_block_budget_;  // 0 = unlimited
-  if (a_->warm_mode_ == "sst" && a_->table_factory_ != nullptr) {
+  if (a_->warm_mode_ == "prepop") {
+    tl_prepop_job.active = false;
+    tl_prepop_job.hot.clear();
+  } else if (a_->warm_mode_ == "sst" && a_->table_factory_ != nullptr) {
     a_->WarmFromFiles(outputs, chosen, budget);
   } else {
     tl_warm_budget_left = budget;
@@ -212,6 +272,11 @@ void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs)
   leaper::CompactionInfo info;
   std::lock_guard<std::mutex> lock(a_->mu_);
   a_->core_->OnCompactionEnd(info, a_->NowUs());
+}
+
+std::shared_ptr<rocksdb::PrepopulateBlockFilter> Adapter::prepopulate_filter() {
+  if (prepop_filter_ == nullptr) prepop_filter_ = std::make_shared<PrepopFilter>(this);
+  return prepop_filter_;
 }
 
 void Adapter::SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
