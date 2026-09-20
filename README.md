@@ -198,8 +198,10 @@ leaper/            engine-independent core (~1,300 lines): collector,
                    LightGBM scorer, multi-step prediction, Algorithm 3,
                    the two-phase policy and six baseline policies
 adapters/leveldb/  LevelDB integration plus a 299-line patch (9 files)
-adapters/rocksdb/  RocksDB integration with no patch to RocksDB, and no
-                   change to leaper/ either, which is the test that the
+adapters/rocksdb/  RocksDB integration: a zero-patch mode (warm by
+                   re-reading output files) and a 43-line RocksDB patch that
+                   makes prepopulate_block_cache selective; no change to
+                   leaper/ either way, which is the test that the
                    core/adapter split is real
 bench/             workload driver and measurement instrumentation
 tools/             offline training, phase calibration, oracle generation,
@@ -283,7 +285,8 @@ ranges through a DB iterator.
 | M2-M3 | Online collector, inference, two-phase prefetcher on LevelDB | [`docs/M2-M3-leveldb-integration.md`](docs/M2-M3-leveldb-integration.md) |
 | M4 | Baseline matrix, oracle upper bound, regime sweeps | [`docs/M4-results.md`](docs/M4-results.md) |
 | M5-M7 | Core/adapter split and the RocksDB port | [`docs/M5-M7-rocksdb.md`](docs/M5-M7-rocksdb.md) |
-| M8 | Review follow-up: eight defects, the paper's own metrics, real traces, and the corrected measurements in section H | [`docs/M8-review-followup.md`](docs/M8-review-followup.md) |
+| M8 | Review follow-up: sixteen defects over three review rounds, the paper's own metrics, real traces, and the corrected measurements in section H | [`docs/M8-review-followup.md`](docs/M8-review-followup.md) |
+| M9 | Toward the journal version: selective prepopulate on RocksDB, the FAST'20 workload model | [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md) |
 
 ## Known gaps
 
@@ -292,13 +295,11 @@ ranges through a DB iterator.
   no locality in byte order, and the 1M-request samples span minutes rather
   than days. Meta's FAST'20 RocksDB traces are the right next dataset, and the
   converter and pipeline are in place (`tools/convert_twitter_trace.py`).
-* **The RocksDB port re-reads what it warms.** RocksDB's own
-  `kFlushAndCompaction` inserts each block into the cache from memory as the
-  table builder produces it; a plug-in has to reopen the finished file. Every
-  RocksDB comparison here is therefore selection-plus-a-re-read against
-  no-selection-and-no-read. Putting the selection inside
-  `prepopulate_block_cache` needs a patch to `BlockBasedTableBuilder`, and it
-  is the single most worthwhile piece of work left.
+* **The RocksDB results in section H were measured with the plug-in
+  re-reading what it warms**, against a built-in that warms from memory.
+  That asymmetry is closed by the `prepop` warm mode (M9), which needs the
+  RocksDB patch; the section-H RocksDB rows are kept as the zero-patch
+  result.
 * **No phase 1 on RocksDB.** Block cache keys derive from a per-file
   `OffsetableCacheKey` held inside the table reader, so eviction is not
   implementable as a plug-in there. Phase 2 is, through `--warm_mode=sst`.

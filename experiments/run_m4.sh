@@ -35,7 +35,7 @@ SLOT=1.0
 WARMUP=30
 
 WORKLOAD=(
-  --num=${NUM_KEYS:-4000000} --value_size=100 --cache_mb="$CACHEMB" --write_buffer_mb=8
+  --num=${NUM_KEYS:-4000000} --value_size=${VALUE_SIZE:-100} --cache_mb="$CACHEMB" --write_buffer_mb=${WRITE_BUFFER_MB:-8}
   --max_file_mb=4 --block_kb=4
   --key_dist=${KEY_DIST:-lifecycle} --zipf=${ZIPF:-0.99}
   --life_range_size=$RANGE --life_hot_slots=${HOT_SLOTS:-16}
