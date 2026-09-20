@@ -26,6 +26,9 @@ CACHEMB=${CACHE_MB:-128}
 NTHREADS=${THREADS:-4}
 TAG=${TAG:-m4}
 MODEL_TAG=${MODEL_TAG:-$TAG}
+# EVAL_SEED varies the evaluation traffic while the model stays the one
+# trained on seed 42; the multi-seed tables (M9, section 4) are 1234..1238.
+EVAL_SEED=${EVAL_SEED:-1234}
 # STAGE=matrix reuses an existing model/oracle and reruns only the policy runs.
 STAGE=${STAGE:-all}
 mkdir -p "$OUT"
@@ -64,8 +67,8 @@ ALPHA=$(grep -o 'leaper_t1_alpha=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt"
 BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt" | cut -d= -f2)
 echo "calibrated alpha=$ALPHA beta=$BETA"
 
-echo "=== 3/4 evaluation trace (seed 1234) -> oracle ==="
-"$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=1234 --fill=0 --policy=off \
+echo "=== 3/4 evaluation trace (seed $EVAL_SEED) -> oracle ==="
+"$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=$EVAL_SEED --fill=0 --policy=off \
        --trace_out="$OUT/${TAG}_eval" --out_prefix="$OUT/${TAG}_off"
 $PY tools/make_oracle.py --trace="$OUT/${TAG}_eval" --range_size=$RANGE \
     --slot_s=$SLOT --slot_offset=$WARMUP --out="$OUT/${MODEL_TAG}.oracle.txt"
@@ -76,7 +79,7 @@ else
   BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt" | cut -d= -f2)
 fi
 
-echo "=== 4/4 policy matrix (seed 1234) ==="
+echo "=== 4/4 policy matrix (seed $EVAL_SEED) ==="
 LEAPER_ARGS=(
   --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
   --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA"
@@ -111,7 +114,7 @@ for POL in ${POLICIES:-off eager_evict incremental_warmup warm_all leaper leaper
   # (5% of operations), so running the policies back to back against one DB
   # grows it by ~260k keys per run -- 46% over seven policies, monotonically,
   # which biases whichever policy happens to run last.
-  "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=1234 --fill=1 --policy="$RUNPOL" \
+  "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=$EVAL_SEED --fill=1 --policy="$RUNPOL" \
          "${LEAPER_ARGS[@]}" ${EXTRA[@]+"${EXTRA[@]}"} --out_prefix="$OUT/${TAG}_$POL"
 done
 

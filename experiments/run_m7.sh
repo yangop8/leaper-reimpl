@@ -20,6 +20,11 @@ DB=${LEAPER_DB:-/tmp/leaper_m7_db}
 OUT=${LEAPER_OUT:-experiments/results}
 DUR=${DURATION:-300}
 TAG=${TAG:-m7}
+# MODEL_TAG names the model/calibration to use when STAGE=matrix reruns the
+# policies under a new TAG; EVAL_SEED varies the evaluation traffic (the
+# model stays the one trained on seed 42).
+MODEL_TAG=${MODEL_TAG:-$TAG}
+EVAL_SEED=${EVAL_SEED:-1234}
 STAGE=${STAGE:-all}
 mkdir -p "$OUT"
 
@@ -52,34 +57,34 @@ if [ "$STAGE" = "all" ]; then
 
   echo "=== 2/3 train models + calibrate ==="
   $PY tools/train_leaper.py --trace="$OUT/${TAG}_train" --slot_s=$SLOT \
-      --range_size=$RANGE --steps=6 --out="$OUT/${TAG}.model" | tail -12
+      --range_size=$RANGE --steps=6 --out="$OUT/${MODEL_TAG}.model" | tail -12
   # The recovery-time constant beta is divided by the cache size online, so
   # it has to be calibrated against the same size the run uses; at 128 MB
   # fixed, a 3 GB run estimated T2 24x too short and used one prediction step.
   $PY tools/calibrate_phases.py "$OUT/${TAG}_train" --block_kb=4 --cache_mb=${CACHE_MB:-128} \
-      | tee "$OUT/${TAG}.calibration.txt"
+      | tee "$OUT/${MODEL_TAG}.calibration.txt"
 fi
-ALPHA=$(grep -o 'leaper_t1_alpha=[0-9.e+-]*' "$OUT/${TAG}.calibration.txt" | cut -d= -f2)
-BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${TAG}.calibration.txt" | cut -d= -f2)
+ALPHA=$(grep -o 'leaper_t1_alpha=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt" | cut -d= -f2)
+BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt" | cut -d= -f2)
 echo "calibrated alpha=$ALPHA beta=$BETA"
 
-echo "=== 3/3 policy matrix (seed 1234) ==="
+echo "=== 3/3 policy matrix (seed $EVAL_SEED) ==="
 for POL in ${POLICIES:-off flush_only flush_and_compaction leaper sst_leaper prepop_leaper leaper_rowcache}; do
   echo "--- $POL ---"
   EXTRA=()
   RUNPOL="$POL"
   case "$POL" in
     leaper)
-      EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
-             --precursors="$OUT/${TAG}.model.precursors.txt"
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
+             --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
              --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
              --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA") ;;
     sst_leaper)
       # Block-level warming of the job's own output files through an
       # SstFileReader that shares the DB's block cache (see sst_warm_check).
       RUNPOL=leaper
-      EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
-             --precursors="$OUT/${TAG}.model.precursors.txt"
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
+             --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
              --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
              --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA"
              --warm_mode=sst) ;;
@@ -89,8 +94,8 @@ for POL in ${POLICIES:-off flush_only flush_and_compaction leaper sst_leaper pre
       # writes it, iff it lies in a predicted-hot range. Same cost as
       # kFlushAndCompaction, with selection.
       RUNPOL=leaper
-      EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
-             --precursors="$OUT/${TAG}.model.precursors.txt"
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
+             --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
              --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
              --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA"
              --warm_mode=prepop) ;;
@@ -99,8 +104,8 @@ for POL in ${POLICIES:-off flush_only flush_and_compaction leaper sst_leaper pre
       # budget plus a 32 MB row cache, to see whether the prefetcher's
       # range-granularity warming helps the row cache more than the block cache.
       RUNPOL=leaper
-      EXTRA=(--model_prefix="$OUT/${TAG}.model" --model_steps=6
-             --precursors="$OUT/${TAG}.model.precursors.txt"
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
+             --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
              --leaper_range_size=$RANGE --leaper_slot_s=$SLOT
              --leaper_t1_alpha="$ALPHA" --leaper_t2_beta="$BETA"
              --row_cache_mb=32) ;;
@@ -108,7 +113,7 @@ for POL in ${POLICIES:-off flush_only flush_and_compaction leaper sst_leaper pre
   # Same reset as M4: the workload inserts new keys, so back-to-back policy
   # runs against one database would grow it monotonically and bias whichever
   # policy runs last.
-  "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=1234 --fill=1 --policy="$RUNPOL" \
+  "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=$EVAL_SEED --fill=1 --policy="$RUNPOL" \
          ${EXTRA[@]+"${EXTRA[@]}"} --out_prefix="$OUT/${TAG}_$POL"
 done
 
