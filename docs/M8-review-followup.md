@@ -1247,3 +1247,18 @@ a background job stalls the foreground takes the hit. This document's
 earlier statements about tail-latency ordering on RocksDB, including the
 corrected one in H18, should be read as observations about single runs;
 the README no longer makes one.
+
+**Round 3, 2026-09-20.** The third review
+([`docs/code-review-round3-2026-09-20.md`](code-review-round3-2026-09-20.md))
+passed everything from the follow-up and found one residual in the same
+budget: a predicted range with no keys in the file being warmed never enters
+the per-key loop, but the Seek to it still reads the block it lands in, so a
+file whose keys sit only in the odd 1,000-key ranges read 355 blocks past a
+budget of 32 when the even ranges were chosen. This is the normal case, not
+a corner: prediction is over the whole key space and each output file
+covers a slice of it. The check now brackets every Seek as well as every
+key. `adapters/rocksdb/budget_check.cc` reproduces the review's setup
+through the public listener callbacks: 355 blocks with no budget, exactly
+32 with one, on both the empty and the populated ranges. No measurement is
+affected; the committed runs' per-job warms were two orders of magnitude
+below their budgets.

@@ -227,7 +227,7 @@ cmake --build build -j
 `scripts/setup.sh` prints the extra steps for the RocksDB half, which needs a
 full RocksDB build.
 
-Three tests are load-bearing rather than decorative:
+Five tests are load-bearing rather than decorative:
 
 * **`gbdt_check`** verifies the hand-written LightGBM text-model scorer
   against LightGBM's own predictions: mean |diff| 3.7e-9, max 3.0e-8 over
@@ -243,6 +243,10 @@ Three tests are load-bearing rather than decorative:
   with `PerfContext` on, require zero block reads from the file. This is what
   lets the RocksDB adapter warm at block granularity with no patch
   (`--warm_mode=sst`).
+* **`budget_check`** (RocksDB) pins the per-job warm budget on the case that
+  slipped past three revisions of it: a file in which the predicted ranges
+  have no keys, where a Seek reads a block without the scan loop ever
+  running. 355 blocks without a budget, exactly 32 with one.
 
 ## Reproducing
 

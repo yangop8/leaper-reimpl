@@ -69,6 +69,15 @@ if(EXISTS "${ROCKSDB_LIB}")
     target_link_libraries(leaper_bench_rocksdb PRIVATE "-framework CoreFoundation" "-framework Security")
   endif()
 
+  # The per-job warm budget on a file where the predicted ranges have no keys.
+  add_executable(budget_check adapters/rocksdb/budget_check.cc)
+  target_include_directories(budget_check PRIVATE leaper/include adapters/rocksdb)
+  target_compile_options(budget_check PRIVATE ${LEAPER_NO_RTTI})
+  target_link_libraries(budget_check PRIVATE leaper_rocksdb Threads::Threads)
+  if(APPLE)
+    target_link_libraries(budget_check PRIVATE "-framework CoreFoundation" "-framework Security")
+  endif()
+
   # Feasibility check for block-level warming through SstFileReader.
   add_executable(sst_warm_check adapters/rocksdb/sst_warm_check.cc)
   target_compile_options(sst_warm_check PRIVATE ${LEAPER_NO_RTTI})

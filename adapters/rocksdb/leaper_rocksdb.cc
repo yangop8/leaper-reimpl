@@ -72,12 +72,16 @@ class Adapter::CacheBridge : public leaper::CacheOps {
     std::unique_ptr<rocksdb::Iterator> it(a_->db_->NewIterator(ro));
     int n = 0;
     bool stopped = false;
-    for (it->Seek(rocksdb::Slice(start)); it->Valid() && n < a_->warm_scan_keys_;
-         it->Next()) {
+    auto over = [&] {
+      return tl_warm_budget_left != 0 && DataBlocksRead() - blocks0 >= tl_warm_budget_left;
+    };
+    it->Seek(rocksdb::Slice(start));
+    if (over()) stopped = true;  // the seek's own read may already exhaust it
+    for (; !stopped && it->Valid() && n < a_->warm_scan_keys_; it->Next()) {
       ++n;
       // Checked per key, so a single scan cannot run a whole range past the
       // budget; the overshoot is at most the block the last key landed in.
-      if (tl_warm_budget_left != 0 && DataBlocksRead() - blocks0 >= tl_warm_budget_left) {
+      if (over()) {
         stopped = true;
         break;
       }
@@ -250,22 +254,28 @@ void Adapter::WarmFromFiles(const std::vector<std::string>& outputs,
     ro.verify_checksums = false;
     std::unique_ptr<rocksdb::Iterator> it(reader.NewIterator(ro));
     bool exhausted = false;
+    auto over = [&] { return budget_blocks != 0 && blocks_so_far() >= budget_blocks; };
     for (const leaper::BlockRef& b : ranges) {
       const std::string start = mapper_->RangeStartKey(b.first_range);
       const std::string limit = mapper_->RangeStartKey(b.last_range + 1);
-      for (it->Seek(rocksdb::Slice(start));
-           it->Valid() && o.comparator->Compare(it->key(), rocksdb::Slice(limit)) < 0;
+      // The budget is checked around every read the scan can make, not only
+      // per key inside the loop. A Seek reads the block it lands in whether
+      // or not that block holds a key of this range, and a predicted range
+      // that has no keys in this particular output file -- normal, since
+      // prediction is over the whole key space and each file covers a slice
+      // of it -- never enters the loop body at all. Checking only there let
+      // a file of alternately empty ranges read 355 blocks past a budget of
+      // 32 (review round 3). So: check before the Seek, right after it, and
+      // per key. A check between ranges only, as first written, let a
+      // single 40,000-key range read 345 blocks past a budget of 32.
+      if (over()) { exhausted = true; break; }
+      it->Seek(rocksdb::Slice(start));
+      if (over()) { exhausted = true; break; }
+      for (; it->Valid() && o.comparator->Compare(it->key(), rocksdb::Slice(limit)) < 0;
            it->Next()) {
         // Reading is the point: each new block the iterator enters is one
-        // fill_cache insert under the key the DB's reader will use. The
-        // budget is checked per key (a thread-local counter read), so one
-        // range cannot overshoot it by more than the block the last key is
-        // in. A check between ranges only, as first written, let a single
-        // 40,000-key range read 345 blocks past a budget of 32.
-        if (budget_blocks != 0 && blocks_so_far() >= budget_blocks) {
-          exhausted = true;
-          break;
-        }
+        // fill_cache insert under the key the DB's reader will use.
+        if (over()) { exhausted = true; break; }
       }
       if (exhausted) break;
     }
