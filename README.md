@@ -186,8 +186,9 @@ table is relative to the cache. The instant-messaging shape over a table
 larger than the cache is where selection wins by the largest margin measured
 on RocksDB, +8.36pp against warming everything's +6.49pp. At that table's own
 8m-row size, where it fits in the cache, warming everything wins instead,
-+19.11pp against +15.35pp, though Leaper holds the lowest tail latency of the
-four policies (p99 36 us against warm-everything's 100). The
++19.11pp against +15.35pp, and at a third of warming everything's tail
+latency (mean per-second p99 36 us against 100; stock and flush-only sit at
+28). The
 read-heavy e-commerce shape leaves nothing to select at all.
 
 ## Layout

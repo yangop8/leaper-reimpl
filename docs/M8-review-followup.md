@@ -1052,11 +1052,15 @@ anywhere on RocksDB.
 C is the opposite corner and the H10 regime map's prediction, confirmed at
 the paper's own workload size: the table fits in the cache, compaction churns
 6.9 GB through it, and recall beats precision, so warming everything wins by
-3.75pp. Leaper is not useless there — it is +15.48pp over stock, and its p99
-is the lowest of the four policies (31 us against stock's 57 and
-`kFlushAndCompaction`'s 106), because it does a fifth of the warming I/O.
-Whoever runs this configuration is choosing between hit ratio and tail
-latency, not between a good policy and a bad one.
+3.75pp. Leaper is not useless there — it is +15.48pp over stock, and its tail
+latency is a third of warming everything's (mean per-second p99 36 us
+against 100 on the re-measured run; stock and flush-only, which warm little
+or nothing from the background thread, sit at 28), because it does a fifth
+of the warming I/O. (An earlier version of this paragraph called Leaper's
+tail the lowest of the four; that compared against a stock run whose p99
+had been inflated by machine load.) Whoever runs this configuration is
+choosing between hit ratio and tail latency, not between a good policy and
+a bad one.
 
 **A caveat that applies to every RocksDB number in this document.**
 `kFlushAndCompaction` inserts each block into the cache as the table builder
@@ -1185,14 +1189,20 @@ within 0.1pp of each other on both devices.
 | IM shape on a 10 GB table (H18-A) | 54.60% | +1.83pp (+0.01) | +6.49pp (+0.02) | **+8.36pp** (-0.35) |
 | IM at its own 8m-row size (H18-C) | 70.20% | +8.17pp (-0.13) | **+19.11pp** (-0.12) | +15.35pp (-0.13) |
 
-Nothing moved. The calibration defect (13) turned out not to change the
-prediction horizon on these workloads: correctly calibrated, the recovery
-window is 1.0 s on the first two configurations and 2.0 s on the third,
-which round to the same one or two steps the mis-calibrated runs had used.
-The timestamp fix (14) moved the lifecycle results by 0.01pp and the
-stationary-zipf ones by up to 0.35pp, consistent with those features
-carrying little transferable signal across seeds (the review said as much
-in its caveat). The RocksDB conclusions of H17 and H18 stand as written.
+Nothing moved beyond 0.35pp. That is not because the fixes were inert: the
+calibration defect (13) did change the prediction horizon. Before it, the
+mis-scaled constant gave a recovery window of a few hundredths of a second
+and so one prediction step everywhere; correctly calibrated, the window is
+about 1.0 s on the first two configurations and 2.0 s on the third, and
+because the online estimate is the constant times the running QPS, it sits
+on the rounding boundary — recomputed from the per-second logs, half to all
+of the time points give two steps. The timestamp fix (14) was applied in
+the same runs, so the two cannot be separated; what the re-measurement
+shows is that the policy ordering and margins of H17 and H18 survive both
+fixes applied together. (An earlier version of this paragraph claimed the
+horizon had not changed and attributed the small differences to the
+timestamp fix; the review follow-up showed the first half of that to be
+wrong, and the second half does not follow.)
 
 **Net effect of the review on the repository's claims.** Eight real
 defects, one of which (16) broke the build for anyone but the author; the

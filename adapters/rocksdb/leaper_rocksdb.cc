@@ -35,6 +35,12 @@ uint64_t MonotonicUs() {
 // OffsetableCacheKey held inside the table reader, so a plug-in cannot address
 // them. Phase 1 is therefore absent on RocksDB, and the results report Leaper
 // there as prefetch-only.
+// Remaining warm budget for the job whose End is running on this thread, in
+// data blocks; 0 means unlimited. CacheOps::Prefetch has no budget parameter
+// (the core interface is engine-neutral), and End and Prefetch always run on
+// the same background thread, so a thread-local is the honest channel.
+static thread_local uint64_t tl_warm_budget_left = 0;
+
 class Adapter::CacheBridge : public leaper::CacheOps {
  public:
   explicit CacheBridge(Adapter* a) : a_(a) {}
@@ -65,15 +71,24 @@ class Adapter::CacheBridge : public leaper::CacheOps {
     ro.iterate_upper_bound = &upper;
     std::unique_ptr<rocksdb::Iterator> it(a_->db_->NewIterator(ro));
     int n = 0;
+    bool stopped = false;
     for (it->Seek(rocksdb::Slice(start)); it->Valid() && n < a_->warm_scan_keys_;
          it->Next()) {
       ++n;
+      // Checked per key, so a single scan cannot run a whole range past the
+      // budget; the overshoot is at most the block the last key landed in.
+      if (tl_warm_budget_left != 0 && DataBlocksRead() - blocks0 >= tl_warm_budget_left) {
+        stopped = true;
+        break;
+      }
     }
     const uint64_t read = DataBlocksRead() - blocks0;
+    if (tl_warm_budget_left != 0) tl_warm_budget_left -= std::min(tl_warm_budget_left, read);
     std::lock_guard<std::mutex> lock(a_->mu_);
     a_->warm_us_ += MonotonicUs() - t0;
     a_->warmed_blocks_ += read;
     ++a_->warmed_;
+    if (stopped) ++a_->warm_budget_stops_;
   }
 
  private:
@@ -176,19 +191,22 @@ void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs)
   if (a_->warm_mode_ == "sst" && a_->table_factory_ != nullptr) {
     a_->WarmFromFiles(outputs, chosen, budget);
   } else {
-    uint64_t used = 0;
+    tl_warm_budget_left = budget;
     for (const leaper::BlockRef& b : chosen) {
-      if (budget != 0 && used >= budget) {
-        std::lock_guard<std::mutex> lock(a_->mu_);
-        ++a_->warm_budget_stops_;
-        break;
-      }
-      const uint64_t before = CacheBridge::DataBlocksRead();
+      if (budget != 0 && tl_warm_budget_left == 0) break;  // Prefetch counted the stop
       a_->bridge_->Prefetch(b);
-      used += CacheBridge::DataBlocksRead() - before;
     }
+    tl_warm_budget_left = 0;
   }
+  // The core's job context is a stack shared by every job (see the core's
+  // OnCompactionBegin). Begin runs its predict-and-choose sequence under
+  // this adapter's mutex so that no other job's Begin interleaves with it;
+  // End's pop has to take the same mutex, or it can restore an older context
+  // in the middle of another job's choosing and that job then selects
+  // against a stale hot set (review follow-up, 2026-09-20, item B). The warm
+  // I/O above stays outside the lock.
   leaper::CompactionInfo info;
+  std::lock_guard<std::mutex> lock(a_->mu_);
   a_->core_->OnCompactionEnd(info, a_->NowUs());
 }
 
@@ -231,8 +249,8 @@ void Adapter::WarmFromFiles(const std::vector<std::string>& outputs,
     ro.fill_cache = true;
     ro.verify_checksums = false;
     std::unique_ptr<rocksdb::Iterator> it(reader.NewIterator(ro));
+    bool exhausted = false;
     for (const leaper::BlockRef& b : ranges) {
-      if (budget_blocks != 0 && blocks_so_far() >= budget_blocks) { ++stops; break; }
       const std::string start = mapper_->RangeStartKey(b.first_range);
       const std::string limit = mapper_->RangeStartKey(b.last_range + 1);
       for (it->Seek(rocksdb::Slice(start));
@@ -240,10 +258,18 @@ void Adapter::WarmFromFiles(const std::vector<std::string>& outputs,
            it->Next()) {
         // Reading is the point: each new block the iterator enters is one
         // fill_cache insert under the key the DB's reader will use. The
-        // budget is re-checked per range rather than per key: one range of
-        // the benchmark's keys is at most a few hundred blocks.
+        // budget is checked per key (a thread-local counter read), so one
+        // range cannot overshoot it by more than the block the last key is
+        // in. A check between ranges only, as first written, let a single
+        // 40,000-key range read 345 blocks past a budget of 32.
+        if (budget_blocks != 0 && blocks_so_far() >= budget_blocks) {
+          exhausted = true;
+          break;
+        }
       }
+      if (exhausted) break;
     }
+    if (exhausted) { ++stops; break; }
   }
   blocks = blocks_so_far();
   std::lock_guard<std::mutex> lock(mu_);
