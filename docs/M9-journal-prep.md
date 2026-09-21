@@ -273,9 +273,9 @@ second, and memoising it is the fix.
 
 ## 3. Where this leaves the claims
 
-Of the five items listed as necessary before a journal write-up, three are
-done (the third, multi-seed variance, is section 4) and one changed shape
-on the way.
+Of the five items listed as necessary before a journal write-up, four are
+done (multi-seed variance is section 4, the phase-1 decision section 5)
+and one changed shape on the way.
 
 **Selective prepopulate (item 3) is settled and closes M8's largest open
 question.** Leaper through RocksDB's own warming path is within 0.2pp of
@@ -323,13 +323,13 @@ ratio, but it is exactly the kind of thing a referee finds first.
 
 **Still open.** A dedicated machine (item 2): the overhead and latency
 columns here were measured on a laptop behind a load gate, and the
-tail-latency non-repeatability noted in M8 has not been revisited. Phase 1
-(item 5): still nothing measurable on LevelDB and not implementable on
-RocksDB; the journal version should present Leaper as a prefetcher with an
-optional eviction phase and say so. Multi-seed variance (item 4) is
-section 4: it settles every ordering in this document except one, the
-ordering among the three warming policies at the paper's scale on RocksDB,
-which it shows to be inside the seed spread.
+tail-latency non-repeatability noted in M8 has not been revisited.
+Multi-seed variance (item 4) is section 4: it settles every ordering in
+this document except one, the ordering among the three warming policies at
+the paper's scale on RocksDB, which it shows to be inside the seed spread.
+Phase 1 (item 5) is section 5: given compactions of 2, 6 and 28 s it is
+inert at every length, for a reason the cache occupancy makes plain, and
+the journal version presents Leaper as a prefetcher.
 
 ## 4. Multi-seed variance
 
@@ -406,3 +406,84 @@ column is a fair proxy for volume; but neither is a fair proxy for "the
 workload", because on this engine how much compaction happens is partly
 the policy's doing. One more reason the dry run, not the compaction count,
 is the control.
+
+## 5. The phase-1 decision
+
+Phase 1 is the eviction half of the two-phase prefetcher: at compaction
+begin, input blocks predicted cold for the compaction's duration T1 are
+dropped from the cache, so that the space serves reads during T1 instead
+of holding blocks the compaction will invalidate anyway. Every earlier
+LevelDB comparison put it within 0.1pp of the prefetch phase alone (+0.04
+on NVMe, +0.11 on slow storage with a 64 MB cache; M8, section I), and
+RocksDB cannot implement it as a plug-in. But those compactions ran for
+0.12-2 s, and a phase whose gain is proportional to T1 had never been
+given a T1. This sweep gives it one: the H14 configuration (slow storage,
+128 MB cache, 40 s hot lifetimes — the cell where selection pays most on
+LevelDB), with the SST size raised 4 -> 16 -> 64 MB so that a compaction
+runs 2 -> 6 -> 28 s at the same compaction volume (1.9-2.2 GB per 180 s
+window: the same writes, rewritten in fewer, larger jobs), 24 prediction
+steps so that k1 + k2 still fit, and the eviction phase run on its own
+(`leaper_p1only`) as well as with and without the prefetch phase. One
+seed; the slow-storage noise floor is 0.3pp. A single >50% CPU process was
+present on the machine for eleven minutes across the 16 MB matrix and the
+64 MB training run, with the load never above 2.7 on ten cores.
+
+| SST size | T1, median | compactions in window | stock | EagerEvict (floor) | phase 1 alone | phase 2 alone | both phases | phase 1 on top of phase 2 |
+|---|---|---|---|---|---|---|---|---|
+| 4 MB | 2.1 s | 56 | 78.53% | +1.56 | +1.52 | +7.93 | +7.68 | -0.25 |
+| 16 MB | 5.6 s | 18 | 79.58% | +1.19 | +1.01 | +2.59 | +2.88 | +0.29 |
+| 64 MB | 28 s | 4 | 81.52% | -0.20 | -0.36 | -0.19 * | -0.33 * | -0.14 |
+
+\* At 64 MB the prefetch phase asked for steps 29-38 and the run had 24
+models: five of its six compactions were clamped (the new `clamped`
+counter) and it warmed 3.4k blocks instead of the ~100k of the other
+sizes. Those two cells measure phase 1 plus nothing, not prefetching.
+
+**Phase 1 is worth nothing at any compaction length reached here.** On its
+own it sits on the floor (-0.04, -0.18, -0.16 against EagerEvict); on top
+of the prefetch phase it is -0.25, +0.29 and -0.14, all inside the noise
+floor and not monotone in T1. Not for want of trying: the phase evicted
+370k, 435k and 461k blocks early per run (the evict-only run's `evicted`
+count less the floor's), with 80% of the candidate ranges predicted cold
+each time.
+
+**Why: the resource it frees is not scarce in the regime where it acts.**
+Under stock LRU the cache is full, 128.0 MB every second. Under any policy
+that reclaims dead blocks it is not: 112 MB on average with 4 MB files,
+104-106 MB with 16 MB files, and with 64 MB files it falls to 7-14 MB at
+the end of each compaction — a 64 MB-file compaction invalidates nearly
+the whole cache at once — and refills over the ~10 s of T2. Phase 1 evicts
+into a cache that already has 10-20% free on average, and that is nearly
+empty at exactly the moment the compaction it was evicting for finishes;
+the reads during T1 were never short of space. The regime the paper
+designed phase 1 for is the opposite one: a cache that stays full through
+a long compaction whose inputs are a large share of it, so that holding
+predicted-cold input blocks for minutes costs hits. That needs long
+compactions *and* a full cache *and* high reuse, and on these two engines
+the three do not coincide: long compactions here come from big files that
+also wipe the cache, and the cache-pressure regimes (cache below the
+working set, M8 section H) are the ones where no warming policy pays at
+all — phase 1 measured +0.11 there.
+
+**Decision.** The journal version presents Leaper as a prefetcher. Phase 2
+is the mechanism behind every margin in this repository; phase 1 is an
+option for engines whose compactions are long, parallel and small relative
+to the cache — X-Engine's, by the paper's description — with the sweep
+above as the evidence that it is inert on LevelDB and not implementable
+on RocksDB. The code keeps both phases (`Options::enable_phase1`, default
+on, for fidelity to the paper); the headline rows are the prefetch phase
+alone, as they have been since M8.
+
+Two side findings belong in the write-up. At a fixed compaction volume,
+bigger SSTs raise the stock hit ratio and shrink every warming margin
+(stock 78.5 -> 79.6 -> 81.5%; Leaper +7.9 -> +2.6 -> nothing measurable),
+because the same bytes are invalidated in fewer, larger events with time
+to refill between them: the size of the invalidation problem is not the
+compaction volume alone but its granularity. And a fixed horizon of 24
+one-second steps is too short for a 28 s compaction; an engine with long
+compactions needs a coarser statistical interval rather than more models,
+since on 40 s lifetimes the models past step 12 are already at precision
+0.5 and past step 20 at 0.2. Twenty-four steps in place of six cost the
+4 MB prefetch row 0.2pp against H14 (7.93 against 8.13): with T2 = 16 s the
+prefetch phase is a union over sixteen models, and the weak far ones admit
+a little noise.

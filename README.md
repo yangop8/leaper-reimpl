@@ -176,13 +176,19 @@ harness can charge that cost to the compaction thread (the default) or to a
 separate thread (`--warm_async`), and the two bracket what a real device would
 do. The verdict does not change between them.
 
-**Phase 1, the eviction phase, adds nothing measurable on LevelDB.** With
-and without it Leaper is within 0.1pp on both devices. The step-1 model's
-recall is 0.80 at precision 0.97, so a fifth of the ranges that will be read
-are predicted cold and their input blocks dropped early, and the cache gives
-that back almost exactly. An earlier version of this file had the two phases
-pulling in opposite directions; that was measured with the ninth and
-eleventh defects present.
+**Phase 1, the eviction phase, adds nothing measurable on LevelDB, at any
+compaction length reached.** With and without it Leaper is within 0.1pp on
+both devices at 2 s compactions, and a sweep of the compaction length to
+6 s and 28 s at the same compaction volume (M9, section 5) finds the same:
+the eviction phase alone sits on the dead-block floor, and on top of
+prefetching it is -0.25, +0.29 and -0.14pp, inside the noise. The space it
+frees is not scarce: any policy that reclaims dead blocks already runs the
+cache 10-20% empty on average, and a big compaction leaves it nearly empty
+at the moment it ends. Leaper here is a prefetcher; the eviction phase
+stays in the code as an option for engines whose compactions are long,
+parallel and small relative to the cache. An earlier version of this file
+had the two phases pulling in opposite directions; that was measured with
+the ninth and eleventh defects present.
 
 ## Results
 
@@ -356,7 +362,7 @@ ranges through a DB iterator.
 | M4 | Baseline matrix, oracle upper bound, regime sweeps | [`docs/M4-results.md`](docs/M4-results.md) |
 | M5-M7 | Core/adapter split and the RocksDB port | [`docs/M5-M7-rocksdb.md`](docs/M5-M7-rocksdb.md) |
 | M8 | Review follow-up: sixteen defects over three review rounds, the paper's own metrics, real traces, and the corrected measurements in section H | [`docs/M8-review-followup.md`](docs/M8-review-followup.md) |
-| M9 | Toward the journal version: selective prepopulate on RocksDB (the re-read never mattered), the FAST'20 ZippyDB model on both engines, the dry-run control, the seventeenth defect, memoised predictions, four-seed variance for the six headline cells | [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md) |
+| M9 | Toward the journal version: selective prepopulate on RocksDB (the re-read never mattered), the FAST'20 ZippyDB model on both engines, the dry-run control, the seventeenth defect, memoised predictions, four-seed variance for the six headline cells, the phase-1 sweep (compactions of 2, 6 and 28 s) | [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md) |
 
 ## Known gaps
 
@@ -374,6 +380,11 @@ ranges through a DB iterator.
   0.2pp of the re-read path on all three configurations, so no section-H
   RocksDB margin was a cost artefact. The section-H rows are kept as the
   zero-patch result.
+* **The prediction horizon is a fixed number of one-second steps.** A
+  28 s compaction asks the prefetch phase for steps beyond the last model
+  and gets nothing (the core now counts these as clamped predictions). An
+  engine with long compactions needs a coarser statistical interval; that
+  configuration is not measured here.
 * **Four evaluation seeds per headline cell, on one laptop.** The seed
   spread settles every ordering claimed here except one: at the paper's
   scale on RocksDB the three warming policies are within a third of a point
