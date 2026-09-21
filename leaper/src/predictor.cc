@@ -94,7 +94,10 @@ void Predictor::PredictHot(const Collector& collector,
   const bool single = (last == 1);
   if (single) step_hi = step_lo;
   else step_hi = std::min(last, step_hi);
-  if (step_hi < step_lo) return;
+  if (step_hi < step_lo) {
+    ++clamped_calls_;
+    return;
+  }
 
   Memo* memo = nullptr;
   if (memoize_) {

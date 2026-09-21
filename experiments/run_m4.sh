@@ -31,6 +31,10 @@ MODEL_TAG=${MODEL_TAG:-$TAG}
 EVAL_SEED=${EVAL_SEED:-1234}
 # STAGE=matrix reuses an existing model/oracle and reruns only the policy runs.
 STAGE=${STAGE:-all}
+# Prediction steps (one model each). k1 + k2 must fit: a compaction longer
+# than STEPS slots leaves the prefetch phase with no model to ask, and the
+# core counts those as clamped predictions.
+STEPS=${STEPS:-6}
 mkdir -p "$OUT"
 
 RANGE=${RANGE_SIZE:-40000}
@@ -39,7 +43,7 @@ WARMUP=30
 
 WORKLOAD=(
   --num=${NUM_KEYS:-4000000} --value_size=${VALUE_SIZE:-100} --cache_mb="$CACHEMB" --write_buffer_mb=${WRITE_BUFFER_MB:-8}
-  --max_file_mb=4 --block_kb=4
+  --max_file_mb=${MAX_FILE_MB:-4} --block_kb=4
   --key_dist=${KEY_DIST:-lifecycle} --zipf=${ZIPF:-0.99}
   --life_range_size=$RANGE --life_hot_slots=${HOT_SLOTS:-16}
   --life_lifetime_s=${LIFETIME_S:-8} --life_ramp_frac=0.25 --life_chain=4 --life_chain_lag=0.2
@@ -59,7 +63,7 @@ echo "=== 1/4 training run (seed 42) ==="
 
 echo "=== 2/4 train models + calibrate phases ==="
 $PY tools/train_leaper.py --trace="$OUT/${TAG}_train" --slot_s=$SLOT \
-    --range_size=$RANGE --steps=6 --dump_eval=2000 --out="$OUT/${MODEL_TAG}.model" | tail -20
+    --range_size=$RANGE --steps=$STEPS --dump_eval=2000 --out="$OUT/${MODEL_TAG}.model" | tail -20
 ./build/leaper/gbdt_check "$OUT/${MODEL_TAG}.model.txt" "$OUT/${MODEL_TAG}.model.eval.csv" | tail -1
 $PY tools/calibrate_phases.py "$OUT/${TAG}_train" --block_kb=4 --cache_mb="$CACHEMB" \
     | tee "$OUT/${MODEL_TAG}.calibration.txt"
@@ -93,16 +97,24 @@ for POL in ${POLICIES:-off eager_evict incremental_warmup warm_all leaper leaper
   RUNPOL="$POL"
   case "$POL" in
     leaper)
-      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=$STEPS
              --precursors="$OUT/${MODEL_TAG}.model.precursors.txt") ;;
     leaper_p2only)
       RUNPOL=leaper
-      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=$STEPS
              --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
              --leaper_phase1=0 ${LEAPER_EXTRA:-}) ;;
+    leaper_p1only)
+      # The eviction phase alone: predicted-cold input blocks are dropped at
+      # compaction begin, nothing is prefetched. Isolates what phase 1 is
+      # worth (M9, section 5: it depends on how long a compaction runs).
+      RUNPOL=leaper
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=$STEPS
+             --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
+             --leaper_phase2=0 ${LEAPER_EXTRA:-}) ;;
     leaper_p2only_ssad)
       RUNPOL=leaper
-      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=6
+      EXTRA=(--model_prefix="$OUT/${MODEL_TAG}.model" --model_steps=$STEPS
              --precursors="$OUT/${MODEL_TAG}.model.precursors.txt"
              --leaper_phase1=0 --ssad_miss_threshold=${SSAD_THRESHOLD:-0}
              --ssad_relative=${SSAD_RELATIVE:-0.3} --ssad_window=${SSAD_WINDOW:-5}) ;;

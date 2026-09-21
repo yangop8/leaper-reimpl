@@ -45,6 +45,11 @@ class Predictor {
   // Options::memoize_predictions; see leaper.h.
   void set_memoize(bool on) { memoize_ = on; }
 
+  // Calls whose step range lay entirely beyond the last model: a compaction
+  // longer than num_steps() slots leaves its prefetch phase (steps k1+1..)
+  // with nothing to ask, and predicts nothing. Silent until M9 section 5.
+  uint64_t clamped_calls() const { return clamped_calls_; }
+
  private:
   void BuildFeatures(const Collector& collector, RangeId range, uint64_t now_us,
                      float* f) const;
@@ -59,6 +64,7 @@ class Predictor {
   };
   mutable std::vector<Memo> memo_;
   bool memoize_ = true;
+  mutable uint64_t clamped_calls_ = 0;
 
   std::vector<GbdtModel> models_;
   std::unordered_map<RangeId, std::vector<RangeId>> precursors_;

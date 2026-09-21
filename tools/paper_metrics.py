@@ -28,7 +28,7 @@ import os
 import statistics
 
 POLICIES = ["off", "eager_evict", "incremental_warmup", "warm_all", "warm_flush",
-            "leaper", "leaper_p2only", "leaper_p2only_ssad", "oracle"]
+            "leaper", "leaper_p1only", "leaper_p2only", "leaper_p2only_ssad", "oracle"]
 
 
 def read_ts(path):

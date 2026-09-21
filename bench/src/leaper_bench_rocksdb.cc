@@ -624,14 +624,14 @@ int Run() {
   if (adapter != nullptr) {
     const leaper::Stats ls = adapter->stats();
     std::fprintf(stderr,
-        "[leaper] reads_seen=%" PRIu64 " inferences=%" PRIu64 " (%.2f us/inf) memo_hits=%" PRIu64 " "
+        "[leaper] reads_seen=%" PRIu64 " inferences=%" PRIu64 " (%.2f us/inf) memo_hits=%" PRIu64 " clamped=%" PRIu64 " "
         "hot=%" PRIu64 " warmed_ranges=%" PRIu64 " warm_us=%" PRIu64
         " warm_mode=%s warmed_blocks=%" PRIu64 " warm_files=%" PRIu64
         " warm_open_failed=%" PRIu64 " warm_budget_stops=%" PRIu64
         " prepop_rejected=%" PRIu64 "\n",
         ls.reads_seen, ls.inferences,
         ls.inferences ? static_cast<double>(ls.inference_us) / ls.inferences : 0.0,
-        ls.memo_hits,
+        ls.memo_hits, ls.clamped_predictions,
         ls.ranges_predicted_hot, adapter->warmed_ranges(), adapter->warm_us(),
         flags.warm_mode.c_str(), adapter->warmed_blocks(), adapter->warm_files(),
         adapter->warm_open_failed(), adapter->warm_budget_stops(),

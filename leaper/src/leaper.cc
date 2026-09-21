@@ -383,6 +383,7 @@ class LeaperImpl : public Leaper {
     Stats s = stats_;
     s.ssad_suspended = ssad_suspended_;
     s.reads_seen = collector_.reads_seen();
+    s.clamped_predictions = predictor_.clamped_calls();
     s.writes_seen = collector_.writes_seen();
     s.sampled = collector_.sampled();
     return s;

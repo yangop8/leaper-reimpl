@@ -828,7 +828,7 @@ int Run() {
     const leaper::Stats ls = adapter->stats();
     std::fprintf(stderr,
         "[leaper] reads_seen=%" PRIu64 " writes_seen=%" PRIu64 " sampled=%" PRIu64 "\n"
-        "[leaper] inferences=%" PRIu64 " inference_us=%" PRIu64 " (%.2f us/inf) memo_hits=%" PRIu64 "\n"
+        "[leaper] inferences=%" PRIu64 " inference_us=%" PRIu64 " (%.2f us/inf) memo_hits=%" PRIu64 " clamped=%" PRIu64 "\n"
         "[leaper] hot=%" PRIu64 " cold=%" PRIu64 " prefetched=%" PRIu64
         " evicted=%" PRIu64 " refused_budget=%" PRIu64 "\n"
         "[leaper] warm_calls=%" PRIu64 " warm_us=%" PRIu64 " warm_FAILED=%" PRIu64
@@ -837,7 +837,7 @@ int Run() {
         "ssad_suspensions=%" PRIu64 "\n",
         ls.reads_seen, ls.writes_seen, ls.sampled, ls.inferences, ls.inference_us,
         ls.inferences ? static_cast<double>(ls.inference_us) / ls.inferences : 0.0,
-        ls.memo_hits,
+        ls.memo_hits, ls.clamped_predictions,
         ls.ranges_predicted_hot, ls.ranges_predicted_cold, ls.blocks_prefetched,
         ls.blocks_evicted, ls.prefetch_refused_budget,
         adapter->warmed_blocks(), adapter->warm_us(), adapter->warm_failed(),

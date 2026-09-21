@@ -213,6 +213,7 @@ struct Stats {
   uint64_t reads_seen = 0, writes_seen = 0, sampled = 0;
   uint64_t inferences = 0, inference_us = 0;
   uint64_t memo_hits = 0;   // predictions answered from the per-second memo
+  uint64_t clamped_predictions = 0;  // step range beyond the last model: nothing predicted
   uint64_t ranges_predicted_hot = 0, ranges_predicted_cold = 0;
   uint64_t blocks_prefetched = 0, blocks_evicted = 0;
   uint64_t overlap_checks = 0, overlap_us = 0;
