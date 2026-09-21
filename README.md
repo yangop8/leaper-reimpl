@@ -107,7 +107,10 @@ flush outputs only", not LRU.** Both are trivial, and RocksDB ships them
 (`prepopulate_block_cache`). On a cache smaller than the working set no
 warming policy beats reclaiming dead blocks: the ones that warm little
 (flush outputs only, Leaper, a one-interval oracle) sit on that floor within
-noise and the ones that warm a lot lose 2-3 points. An earlier version of
+noise and the ones that warm a lot lose 2-3 points. Warming everything also
+makes the cache a function of how much compaction the run happened to do:
+on the ZippyDB model its outcome spans 65% to 78% across seeds, in exact
+order of the compaction volume, while Leaper's stays within 0.2pp. An earlier version of
 this file had flush-only warming winning that regime by half a point; that
 was the ninth defect, a nested flush leaving its flag set so the policy also
 warmed part of each compaction, and it is gone.
@@ -199,6 +202,10 @@ and [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md).
 | **Leaper (prefetch phase)** | **86.79%** | **+3.25pp** | **0.72** |
 | Oracle, one interval of foresight | 88.79% | +5.26pp | 0.88 |
 
+Over four more evaluation seeds (M9, section 4): LRU 83.30 ± 0.33%,
+EagerEvict +0.19 ± 0.03pp, WarmAll -0.02 ± 0.13pp (mixed sign), Leaper
+**+2.99 ± 0.12pp** (+2.84 to +3.11), the same sign on every seed.
+
 **RocksDB, 10 GB of data, 3 GB block cache, 200 s** — the paper's scale, with
 a stable hot set:
 
@@ -208,6 +215,15 @@ a stable hot set:
 | `kFlushOnly` | 91.51% | +1.40pp |
 | `kFlushAndCompaction` | 91.40% | +1.29pp |
 | **Leaper, block-level warming** | **91.67%** | **+1.56pp** |
+
+Over four more evaluation seeds (M9, section 4), through the patched
+prepopulate path: stock 90.53 ± 0.24%, `kFlushOnly` +1.38 ± 0.21pp,
+`kFlushAndCompaction` +1.39 ± 0.32pp, Leaper +1.65 ± 0.09pp. Leaper's
+paired margin over `kFlushAndCompaction` is +0.26 ± 0.30 (every seed
+positive, the smallest +0.02) and over `kFlushOnly` +0.27 ± 0.25 with one
+seed negative: **the three warming policies are within a third of a point
+of each other at this scale, and their ordering is inside the seed
+spread.** Leaper's margin over stock is the most repeatable of the three.
 
 Reproduced as the paper's two real workload *shapes* (stationary power laws,
 Table 2 of the paper), the answer depends on which one and on how big the
@@ -235,9 +251,15 @@ the cache, and compaction rewrites 700x what the workload writes:
 | Leaper, same inference, predictions discarded (dry run) | 74.53% | +0.97pp | 668 | — |
 | **Leaper (prefetch phase), predictions memoised** | **84.86%** | **+11.32pp** | 1,066 | 0.57 |
 
+Over four more evaluation seeds (M9, section 4): LRU 73.57 ± 0.01%,
+WarmFlushOnly +0.92 ± 0.10pp, Leaper **+11.24 ± 0.08pp** (+11.19 to
++11.35) and +10.32 ± 0.04pp over WarmFlushOnly. WarmAll is -1.10 ± 4.01pp,
+from 70.1% to 78.5% — its outcome tracks the compaction volume of the run
+exactly (26.7 to 62.2 GB across five seeds), Leaper's does not.
+
 On RocksDB the same model, at 3 GB of cache, gives every policy that warms
 compaction output +0.8 to +0.9pp and Leaper equal to `kFlushAndCompaction`
-within noise; the same table, both engines, is in M9.
+(-0.02 ± 0.01pp over four seeds); the same table, both engines, is in M9.
 
 ## Layout
 
@@ -334,7 +356,7 @@ ranges through a DB iterator.
 | M4 | Baseline matrix, oracle upper bound, regime sweeps | [`docs/M4-results.md`](docs/M4-results.md) |
 | M5-M7 | Core/adapter split and the RocksDB port | [`docs/M5-M7-rocksdb.md`](docs/M5-M7-rocksdb.md) |
 | M8 | Review follow-up: sixteen defects over three review rounds, the paper's own metrics, real traces, and the corrected measurements in section H | [`docs/M8-review-followup.md`](docs/M8-review-followup.md) |
-| M9 | Toward the journal version: selective prepopulate on RocksDB (the re-read never mattered), the FAST'20 ZippyDB model on both engines, the dry-run control, the seventeenth defect, memoised predictions | [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md) |
+| M9 | Toward the journal version: selective prepopulate on RocksDB (the re-read never mattered), the FAST'20 ZippyDB model on both engines, the dry-run control, the seventeenth defect, memoised predictions, four-seed variance for the six headline cells | [`docs/M9-journal-prep.md`](docs/M9-journal-prep.md) |
 
 ## Known gaps
 
@@ -352,10 +374,11 @@ ranges through a DB iterator.
   0.2pp of the re-read path on all three configurations, so no section-H
   RocksDB margin was a cost artefact. The section-H rows are kept as the
   zero-patch result.
-* **One run per cell.** Every table is a single run against a noise floor
-  measured on same-seed repeats (0.01pp on RocksDB at scale, 0.2-0.3pp on
-  LevelDB). Margins under a point on RocksDB need seeds before they are
-  claims.
+* **Four evaluation seeds per headline cell, on one laptop.** The seed
+  spread settles every ordering claimed here except one: at the paper's
+  scale on RocksDB the three warming policies are within a third of a point
+  and their order is inside the spread. The models are trained once (seed
+  42); training-set variance is not measured.
 * **No phase 1 on RocksDB.** Block cache keys derive from a per-file
   `OffsetableCacheKey` held inside the table reader, so eviction is not
   implementable as a plug-in there. Phase 2 is, through `--warm_mode=sst`.

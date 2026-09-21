@@ -273,8 +273,9 @@ second, and memoising it is the fix.
 
 ## 3. Where this leaves the claims
 
-Of the five items listed as necessary before a journal write-up, two are
-done and one changed shape on the way.
+Of the five items listed as necessary before a journal write-up, three are
+done (the third, multi-seed variance, is section 4) and one changed shape
+on the way.
 
 **Selective prepopulate (item 3) is settled and closes M8's largest open
 question.** Leaper through RocksDB's own warming path is within 0.2pp of
@@ -320,13 +321,88 @@ run retracts it. The harness defect the investigation turned up (the
 monitor's clock drift, the seventeenth) inflated a QPS column, not a hit
 ratio, but it is exactly the kind of thing a referee finds first.
 
-**Still open.** Multi-seed variance (item 4): every table in this document
-is one run per cell, against noise floors measured on same-seed repeats
-(0.01pp on RocksDB at scale, 0.2-0.3pp on LevelDB); the LevelDB ZippyDB
-margin is thirty times its floor, the small RocksDB margins are not, and
-those need seeds before they are claims. A dedicated machine (item 2): the
-overhead and latency columns here were measured on a laptop behind a load
-gate, and the tail-latency non-repeatability noted in M8 has not been
-revisited. Phase 1 (item 5): still nothing measurable on LevelDB and not
-implementable on RocksDB; the journal version should present Leaper as a
-prefetcher with an optional eviction phase and say so.
+**Still open.** A dedicated machine (item 2): the overhead and latency
+columns here were measured on a laptop behind a load gate, and the
+tail-latency non-repeatability noted in M8 has not been revisited. Phase 1
+(item 5): still nothing measurable on LevelDB and not implementable on
+RocksDB; the journal version should present Leaper as a prefetcher with an
+optional eviction phase and say so. Multi-seed variance (item 4) is
+section 4: it settles every ordering in this document except one, the
+ordering among the three warming policies at the paper's scale on RocksDB,
+which it shows to be inside the seed spread.
+
+## 4. Multi-seed variance
+
+Four more evaluation seeds (1235-1238) for the six cells the claims rest
+on, models fixed (trained on seed 42), every policy in a cell on one
+binary (LevelDB `bench_leveldb_v10`, RocksDB `bench_rocksdb_v8`: the memo,
+the tick-aligned monitor and the sine units all in). Margins are paired per
+seed — the same seed is the same traffic for every policy — and reported as
+mean ± sample sd over the four seeds, with the range; `tools/seed_stats.py`
+computes them and section M9.3 of `experiments/results/M8-report.txt` has
+the full tables. The seed-1234 rows of sections 1-2 and of M8 were measured
+on earlier binaries and are quoted as a fifth point only where that does
+not matter. 84 runs, 7 h 07 min behind the quiet-machine gate.
+
+| cell | stock, mean ± sd | policy | vs stock, mean ± sd (range) | paired vs the built-in |
+|---|---|---|---|---|
+| LevelDB, ZippyDB model, 256 MB | 73.57 ± 0.01 | WarmFlushOnly | +0.92 ± 0.10 (+0.85..+1.07) | |
+| | | WarmAll | **-1.10 ± 4.01 (-3.51..+4.89), mixed sign** | |
+| | | Leaper (prefetch) | **+11.24 ± 0.08 (+11.19..+11.35)** | +10.32 ± 0.04 over WarmFlushOnly |
+| RocksDB, paper scale, lifecycle 60 s | 90.53 ± 0.24 | `kFlushOnly` | +1.38 ± 0.21 (+1.14..+1.58) | |
+| | | `kFlushAndCompaction` | +1.39 ± 0.32 (+0.95..+1.69) | |
+| | | Leaper (prepopulate) | +1.65 ± 0.09 (+1.53..+1.72) | +0.26 ± 0.30 over `kFlushAndCompaction` (min +0.02); +0.27 ± 0.25 over `kFlushOnly`, one seed negative |
+| RocksDB, IM shape on 10 GB | 54.61 ± 0.02 | `kFlushAndCompaction` | +6.53 ± 0.03 | |
+| | | Leaper (prepopulate) | **+8.52 ± 0.03** | +1.99 ± 0.01 over `kFlushAndCompaction` |
+| RocksDB, IM at 8m rows | 70.19 ± 0.02 | `kFlushAndCompaction` | **+19.21 ± 0.06** | |
+| | | Leaper (prepopulate) | +15.55 ± 0.05 | -3.67 ± 0.08 under `kFlushAndCompaction` |
+| RocksDB, ZippyDB model, 256 MB | 81.14 ± 0.02 | `kFlushAndCompaction` | +0.89 ± 0.01 | |
+| | | Leaper (prepopulate) | +0.87 ± 0.01 | -0.02 ± 0.01: equal |
+| LevelDB, NVMe, 128 MB (H2) | 83.30 ± 0.33 | EagerEvict | +0.19 ± 0.03 | |
+| | | WarmAll | -0.02 ± 0.13, mixed sign | |
+| | | Leaper (prefetch) | **+2.99 ± 0.12 (+2.84..+3.11)** | +2.80 over the floor |
+
+What the seeds change, and what they do not.
+
+**Every Leaper margin over stock keeps its sign on every seed, and every
+one of them is tighter than the corresponding built-in's.** On the two
+LevelDB cells the stock hit ratio itself moves with the seed (83.00-83.75%
+on H2) and the paired margins do not (+2.84..+3.11); on RocksDB at the
+paper's scale the built-ins' margins spread 0.4-0.7pp across seeds where
+Leaper's spreads 0.2.
+
+**The ordering among the three warming policies at the paper's scale on
+RocksDB is not established.** Leaper is above `kFlushAndCompaction` on all
+four seeds, by +0.02 to +0.70, and above `kFlushOnly` on three of four;
+section H's "+1.55 against +1.30 and +1.39" was one seed of a spread the
+size of the differences. The honest statement is that the three are within
+a third of a point of each other there, with Leaper's margin over stock the
+most repeatable of the three. The two IM cells and the two ZippyDB cells
+are the opposite: seed spreads of 0.01-0.08pp against margins of 2.0, 3.7,
+0.0 and 10.3 points, so those orderings are settled.
+
+**WarmAll on the LevelDB ZippyDB cell is not a number; it is a function of
+how much compaction the run happened to do.** Its four seeds gave 70.09,
+70.49, 70.84 and 78.46%, and the seed-1234 run 65.38%; the compaction
+volume of those five runs was 47.8, 47.0, 46.0, 26.7 and 62.2 GB — the
+ordering is exact. Warming every output block makes the cache's contents a
+function of the compaction stream: more compaction, more thrash. Leaper's
+runs compacted between 22.8 and 42.3 GB across the same seeds and its hit
+ratio stayed within 84.76-84.92%; WarmFlushOnly's stayed within
+74.44-74.64% over 25.4-49.5 GB. Selection decouples the cache from the
+compaction volume; warming everything couples it. That is section 2's dry
+run seen from the other side.
+
+**LevelDB's compaction volume is not a property of the workload alone.**
+Across seeds, stock's compaction in the window ranges from 46.6 to 70.4 GB
+for the same writes. And on seed 1238 the stock run compacted 52.6 GB while
+every policy with a warm path on the compaction thread compacted about half
+of it — WarmFlushOnly 25.4, WarmAll 26.7, Leaper 22.8 GB — with the same 55
+flushes, no trivial moves, and 8% more SST files alive at the peak: the
+compaction did not disappear, it lagged, and the sequence of jobs LevelDB
+picked from that different level-0 state rewrote half as much. Counts and
+bytes move together throughout (30-38 MB per job), so the compaction count
+column is a fair proxy for volume; but neither is a fair proxy for "the
+workload", because on this engine how much compaction happens is partly
+the policy's doing. One more reason the dry run, not the compaction count,
+is the control.

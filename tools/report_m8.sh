@@ -150,3 +150,11 @@ $PY tools/summarize_matrix.py $OUT m7zippy 2>/dev/null | grep -v missing | sed -
 $PY tools/summarize_matrix.py $OUT m4zippy 2>/dev/null | grep -v missing | sed -n '3,9p'
 echo "-- LevelDB controls (docs/M9-journal-prep.md, section 2): async warm, one step, 100k ranges, dry run, v9 (memo + tick monitor)"
 for T in m4zippy_async m4zippy_step1 m4zippy_r100k m4zippy_dry m4zippy_v9; do $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,9p' | sed "s/^/  [$T] /"; done
+
+sec "M9.3 Multi-seed variance: four evaluation seeds per cell (1235-1238), models fixed, paired margins vs the first policy"
+echo "-- LevelDB ZippyDB model"; $PY tools/seed_stats.py $OUT off,warm_flush,warm_all,leaper_p2only m4zippy_s1235 m4zippy_s1236 m4zippy_s1237 m4zippy_s1238 | sed -n '3,8p'
+echo "-- RocksDB paper scale"; $PY tools/seed_stats.py $OUT off,flush_only,flush_and_compaction,prepop_leaper m7paper3_s1235 m7paper3_s1236 m7paper3_s1237 m7paper3_s1238 | sed -n '3,8p'
+echo "-- RocksDB IM on 10 GB"; $PY tools/seed_stats.py $OUT off,flush_and_compaction,prepop_leaper m7zipf09_s1235 m7zipf09_s1236 m7zipf09_s1237 m7zipf09_s1238 | sed -n '3,7p'
+echo "-- RocksDB IM at 8m rows"; $PY tools/seed_stats.py $OUT off,flush_and_compaction,prepop_leaper m7fit_im_s1235 m7fit_im_s1236 m7fit_im_s1237 m7fit_im_s1238 | sed -n '3,7p'
+echo "-- RocksDB ZippyDB model"; $PY tools/seed_stats.py $OUT off,flush_and_compaction,prepop_leaper m7zippy_s1235 m7zippy_s1236 m7zippy_s1237 m7zippy_s1238 | sed -n '3,7p'
+echo "-- LevelDB NVMe 128 MB (H2)"; $PY tools/seed_stats.py $OUT off,eager_evict,warm_all,leaper_p2only m4_nvme_s1235 m4_nvme_s1236 m4_nvme_s1237 m4_nvme_s1238 | sed -n '3,8p'
