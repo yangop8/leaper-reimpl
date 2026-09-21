@@ -38,7 +38,11 @@ STEPS=${STEPS:-6}
 mkdir -p "$OUT"
 
 RANGE=${RANGE_SIZE:-40000}
-SLOT=1.0
+# Statistical interval t, in seconds, for the collector, the trainer and the
+# oracle alike. Compactions longer than STEPS slots leave the prefetch phase
+# with no model to ask, so long compactions want a coarser slot (M9,
+# section 5: 64 MB SSTs, T1 = 28 s, 24 one-second steps clamped 5 of 6).
+SLOT=${SLOT_S:-1.0}
 WARMUP=30
 
 WORKLOAD=(
