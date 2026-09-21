@@ -263,7 +263,7 @@ WarmFlushOnly +0.92 ± 0.10pp, Leaper **+11.24 ± 0.08pp** (+11.19 to
 from 70.1% to 78.5% — its outcome tracks the compaction volume of the run
 exactly (26.7 to 62.2 GB across five seeds), Leaper's does not.
 
-On RocksDB the same model, at 3 GB of cache, gives every policy that warms
+On RocksDB the same model, at 256 MB of cache, gives every policy that warms
 compaction output +0.8 to +0.9pp and Leaper equal to `kFlushAndCompaction`
 (-0.02 ± 0.01pp over four seeds); the same table, both engines, is in M9.
 
@@ -275,8 +275,10 @@ leaper/            engine-independent core (~1,300 lines): collector,
                    the two-phase policy and six baseline policies
 adapters/leveldb/  LevelDB integration plus a 299-line patch (9 files)
 adapters/rocksdb/  RocksDB integration: a zero-patch mode (warm by
-                   re-reading output files) and a 43-line RocksDB patch that
-                   makes prepopulate_block_cache selective; no change to
+                   re-reading output files; builds against pristine 11.8)
+                   and a 43-line RocksDB patch that makes
+                   prepopulate_block_cache selective (required for
+                   warm_mode=prepop; CMake detects it); no change to
                    leaper/ either way, which is the test that the
                    core/adapter split is real
 bench/             workload driver and measurement instrumentation
@@ -321,6 +323,11 @@ Five tests are load-bearing rather than decorative:
   with `PerfContext` on, require zero block reads from the file. This is what
   lets the RocksDB adapter warm at block granularity with no patch
   (`--warm_mode=sst`).
+* Two script-level checks from the M9 review:
+  `scripts/check_pristine_rocksdb_build.sh` (the adapter and bench compile
+  against an unpatched RocksDB 11.8; only `warm_mode=prepop` needs the
+  patch) and `scripts/check_run_m4_oracle_binding.sh` (a matrix rerun under
+  a new evaluation seed makes its own oracle or refuses a mismatched one).
 * **`budget_check`** (RocksDB) pins the per-job warm budget on the case that
   slipped past three revisions of it: a file in which the predicted ranges
   have no keys, where a Seek reads a block without the scan loop ever

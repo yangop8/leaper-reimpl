@@ -24,7 +24,10 @@ echo "==> build (LevelDB half)"
 echo "    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release"
 echo "    cmake --build build -j"
 echo
-echo "==> RocksDB patch (optional; only warm_mode=prepop needs it)"
+echo "==> RocksDB patch (needed for warm_mode=prepop; the iterator and sst modes build without it)"
+echo "    Apply it after 'git submodule update --init third_party/rocksdb' and BEFORE building the"
+echo "    engine and the adapter; CMake detects it (LEAPER_HAVE_PREPOP_FILTER). If the engine was"
+echo "    built before the patch, rebuild build-rocksdb, then reconfigure and rebuild build/."
 RPATCH=adapters/rocksdb/rocksdb-11.8-prepopulate-filter.patch
 if [ -d third_party/rocksdb/.git ] || [ -f third_party/rocksdb/.git ]; then
   if git -C third_party/rocksdb apply --check --reverse "../../$RPATCH" 2>/dev/null; then
@@ -39,6 +42,7 @@ fi
 echo
 echo "==> build (RocksDB half, optional; takes a while)"
 echo "    git submodule update --init third_party/rocksdb"
+echo "    ./scripts/setup.sh              # again, now that the submodule exists: applies the RocksDB patch"
 echo "    cmake -S third_party/rocksdb -B build-rocksdb -G Ninja -DCMAKE_BUILD_TYPE=Release \\"
 echo "          -DWITH_GFLAGS=0 -DWITH_TESTS=0 -DWITH_TOOLS=0 -DROCKSDB_BUILD_SHARED=0"
 echo "    cmake --build build-rocksdb --target rocksdb -j"

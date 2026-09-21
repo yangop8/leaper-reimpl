@@ -91,7 +91,13 @@ class Adapter {
   std::shared_ptr<rocksdb::EventListener> listener();
   // For warm_mode "prepop": install this as
   // BlockBasedTableOptions::prepopulate_block_filter before opening the DB.
+  // Only compiled against a RocksDB carrying the prepopulate-filter patch
+  // (CMake defines LEAPER_HAVE_PREPOP_FILTER); Create() refuses the mode
+  // otherwise, so the iterator and sst modes build on a pristine 11.8.
+  static bool PrepopSupported();
+#if LEAPER_HAVE_PREPOP_FILTER
   std::shared_ptr<rocksdb::PrepopulateBlockFilter> prepopulate_filter();
+#endif
   uint64_t prepop_rejected() const { return prepop_rejected_; }
   // Required for warm_mode "sst": the DB's own table factory (so the reader
   // shares its block cache) and comparator.
@@ -137,8 +143,10 @@ class Adapter {
   uint64_t warmed_blocks_ = 0, warm_files_ = 0, warm_open_failed_ = 0;
   uint64_t warm_block_budget_ = 0, warm_budget_stops_ = 0;
   uint64_t prepop_rejected_ = 0;
+#if LEAPER_HAVE_PREPOP_FILTER
   class PrepopFilter;
   std::shared_ptr<PrepopFilter> prepop_filter_;
+#endif
   void WarmFromFiles(const std::vector<std::string>& outputs,
                      const std::vector<leaper::BlockRef>& ranges,
                      uint64_t budget_blocks);

@@ -55,6 +55,7 @@ struct PrepopJob {
 };
 static thread_local PrepopJob tl_prepop_job;
 
+#if LEAPER_HAVE_PREPOP_FILTER
 // The filter RocksDB's patched builder consults for every data block it is
 // about to warm: yes iff the block's key span overlaps a chosen range of the
 // job running on this thread, and the job's budget is not spent.
@@ -87,6 +88,7 @@ class Adapter::PrepopFilter : public rocksdb::PrepopulateBlockFilter {
   }
   Adapter* a_;
 };
+#endif  // LEAPER_HAVE_PREPOP_FILTER
 
 class Adapter::CacheBridge : public leaper::CacheOps {
  public:
@@ -274,10 +276,20 @@ void Adapter::Listener::End(int job_id, const std::vector<std::string>& outputs)
   a_->core_->OnCompactionEnd(info, a_->NowUs());
 }
 
+bool Adapter::PrepopSupported() {
+#if LEAPER_HAVE_PREPOP_FILTER
+  return true;
+#else
+  return false;
+#endif
+}
+
+#if LEAPER_HAVE_PREPOP_FILTER
 std::shared_ptr<rocksdb::PrepopulateBlockFilter> Adapter::prepopulate_filter() {
   if (prepop_filter_ == nullptr) prepop_filter_ = std::make_shared<PrepopFilter>(this);
   return prepop_filter_;
 }
+#endif
 
 void Adapter::SetTableFactory(std::shared_ptr<rocksdb::TableFactory> factory,
                               const rocksdb::Comparator* comparator) {
@@ -364,6 +376,14 @@ std::unique_ptr<Adapter> Adapter::Create(const AdapterOptions& opts,
   a->start_us_ = MonotonicUs();
   a->warm_scan_keys_ = opts.warm_scan_keys;
   a->warm_mode_ = opts.warm_mode;
+  if (a->warm_mode_ == "prepop" && !PrepopSupported()) {
+    if (error) {
+      *error = "warm_mode=prepop needs the RocksDB prepopulate-filter patch "
+               "(adapters/rocksdb/rocksdb-11.8-prepopulate-filter.patch); this build "
+               "was configured against a RocksDB without it";
+    }
+    return nullptr;
+  }
   a->warm_block_budget_ = static_cast<uint64_t>(
       opts.core.max_prefetch_frac * opts.core.cache_bytes / opts.warm_block_bytes);
   a->range_size_ = opts.core.range_size ? opts.core.range_size : 1;

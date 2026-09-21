@@ -57,6 +57,29 @@ if(EXISTS "${ROCKSDB_LIB}")
 
   add_library(leaper_rocksdb adapters/rocksdb/leaper_rocksdb.cc)
   target_include_directories(leaper_rocksdb PUBLIC adapters/rocksdb)
+  # The selective-prepopulate path needs the 43-line RocksDB patch
+  # (adapters/rocksdb/rocksdb-11.8-prepopulate-filter.patch). Detect it, so
+  # that the adapter and the bench still build against a pristine 11.8 with
+  # the iterator and sst warm modes only (M9 review, 2026-09-21, R2).
+  include(CheckCXXSourceCompiles)
+  set(CMAKE_REQUIRED_INCLUDES "${CMAKE_SOURCE_DIR}/third_party/rocksdb/include")
+  set(CMAKE_REQUIRED_FLAGS "-std=c++17")
+  check_cxx_source_compiles("
+    #include \"rocksdb/table.h\"
+    struct F : rocksdb::PrepopulateBlockFilter {
+      bool ShouldWarm(rocksdb::TableFileCreationReason, const rocksdb::Slice&,
+                      const rocksdb::Slice&) override { return true; }
+    };
+    int main() { rocksdb::BlockBasedTableOptions o; o.prepopulate_block_filter = nullptr; return 0; }
+  " LEAPER_HAVE_PREPOP_FILTER)
+  unset(CMAKE_REQUIRED_INCLUDES)
+  unset(CMAKE_REQUIRED_FLAGS)
+  if(LEAPER_HAVE_PREPOP_FILTER)
+    target_compile_definitions(leaper_rocksdb PUBLIC LEAPER_HAVE_PREPOP_FILTER=1)
+    message(STATUS "RocksDB prepopulate filter patch: present (warm_mode=prepop available)")
+  else()
+    message(STATUS "RocksDB prepopulate filter patch: absent (warm_mode=prepop unavailable; iterator/sst only)")
+  endif()
   # RocksDB is also compiled -fno-rtti (its USE_RTTI defaults off), so anything
   # deriving from rocksdb::EventListener has to match or the link fails on
   # "typeinfo for rocksdb::Customizable". leaper_core keeps RTTI on so that the

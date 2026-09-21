@@ -433,9 +433,15 @@ int Run() {
   if (adapter != nullptr && flags.warm_mode == "prepop") {
     // Leaper through RocksDB's own prepopulate path, made selective by the
     // patch in adapters/rocksdb/: same zero-I/O warming as kFlushAndCompaction.
+    // Adapter::Create has already refused the mode on an unpatched build.
+#if LEAPER_HAVE_PREPOP_FILTER
     bbt.prepopulate_block_cache =
         rocksdb::BlockBasedTableOptions::PrepopulateBlockCache::kFlushAndCompaction;
     bbt.prepopulate_block_filter = adapter->prepopulate_filter();
+#else
+    std::fprintf(stderr, "warm_mode=prepop is not available in this build (RocksDB patch absent)\n");
+    return 2;
+#endif
   }
   if (flags.policy == "flush_only") {
     bbt.prepopulate_block_cache =

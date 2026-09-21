@@ -301,7 +301,7 @@ regime map in one experiment:
 
 | engine | write amplification in the window | best heuristic | Leaper (prefetch phase) |
 |---|---|---|---|
-| RocksDB 11.8, 3 GB cache | ~6 (647 MB of compaction on 104 MB flushed) | `kFlushAndCompaction` +0.88pp | +0.79 / +0.85pp: within noise of it |
+| RocksDB 11.8, 256 MB cache | ~6 (647 MB of compaction on 104 MB flushed) | `kFlushAndCompaction` +0.88pp | +0.79 / +0.85pp: within noise of it |
 | LevelDB 1.23, 256 MB cache | ~700 (78 GB on 108 MB) | WarmFlushOnly +0.89pp | +11.05pp throttled, +11.32pp with the memo: ten points clear |
 
 RocksDB's compaction destroys so little that there is nothing to recover and
@@ -519,3 +519,36 @@ horizon T1 + T2 must be short against the hot set's lifetime**, which the
 paper's X-Engine setting (compactions of minutes against hot sets of
 hours, by its Table 2) satisfies and a 128 MB cache with 64 MB files does
 not.
+
+## 6. Review of the M9 code (2026-09-21)
+
+An independent review of everything between `500fe35` and `0158fa9`
+([`docs/code-review-m9-2026-09-21.md`](code-review-m9-2026-09-21.md)) found
+two P2 items and one P3, none of which touch a reported number; all three
+are fixed, each with an acceptance check.
+
+* **R1 — the oracle was bound to the model, not to the evaluation traffic.**
+  `run_m4.sh` wrote the oracle as `${MODEL_TAG}.oracle.txt` and a
+  `STAGE=matrix` rerun with a new `EVAL_SEED` would have read it: a future
+  of seed 1234 offered to traffic of seed 1235. No committed table has that
+  defect (the multi-seed matrices ran no oracle row), but the interface
+  invited it. The oracle is now `${TAG}.oracle.txt` with a `.meta` recording
+  its identity (seed, range, slot, warmup, the full workload line); a matrix
+  rerun that asks for the oracle policy makes one for its own traffic when
+  none exists and refuses one whose identity differs (exit 3). Non-oracle
+  policies reuse the model as before.
+  `scripts/check_run_m4_oracle_binding.sh` drives the real script with a
+  stub bench through all three cases.
+* **R2 — the RocksDB patch had become a build requirement while being
+  documented as optional.** The adapter derived from
+  `rocksdb::PrepopulateBlockFilter` unconditionally, so a pristine 11.8
+  could no longer build the iterator and sst modes that were advertised as
+  zero-patch. CMake now detects the patch (`LEAPER_HAVE_PREPOP_FILTER`),
+  the filter class and `prepopulate_filter()` compile only with it,
+  `Adapter::Create` refuses `warm_mode=prepop` without it, and `setup.sh`
+  says when to apply the patch (after the submodule exists, before building
+  the engine). `scripts/check_pristine_rocksdb_build.sh` syntax-checks the
+  adapter and the bench against the submodule's unpatched `table.h`.
+* **R3 — two labels called the RocksDB ZippyDB cache 3 GB.** It is 256 MB
+  (section 2 and the calibration file agree); README and the section-3
+  table are corrected.

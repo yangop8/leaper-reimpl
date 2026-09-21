@@ -14,7 +14,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BIN=./build/leaper_bench
+BIN=${LEAPER_BIN:-./build/leaper_bench}
 PY=.venv/bin/python
 DB=${LEAPER_DB:-/tmp/leaper_m4_db}
 OUT=${LEAPER_OUT:-experiments/results}
@@ -60,6 +60,18 @@ WORKLOAD=(
   ${EXTRA_ARGS:-}
 )
 
+# What an oracle file is the future of: the evaluation seed, the range and
+# slot it was binned at, and the workload it was traced from. Stored next to
+# the oracle as ${TAG}.oracle.meta and checked before a matrix rerun uses it.
+ORACLE_IDENTITY="seed=$EVAL_SEED range_size=$RANGE slot_s=$SLOT warmup=$WARMUP workload=${WORKLOAD[*]}"
+make_oracle() {
+  "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=$EVAL_SEED --fill=0 --policy=off \
+         --trace_out="$OUT/${TAG}_eval" --out_prefix="$OUT/${TAG}_off"
+  $PY tools/make_oracle.py --trace="$OUT/${TAG}_eval" --range_size=$RANGE \
+      --slot_s=$SLOT --slot_offset=$WARMUP --out="$OUT/${TAG}.oracle.txt"
+  echo "$ORACLE_IDENTITY" > "$OUT/${TAG}.oracle.meta"
+}
+
 if [ "$STAGE" = "all" ]; then
 echo "=== 1/4 training run (seed 42) ==="
 "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=42 --fill=1 --policy=off \
@@ -76,15 +88,32 @@ BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt" |
 echo "calibrated alpha=$ALPHA beta=$BETA"
 
 echo "=== 3/4 evaluation trace (seed $EVAL_SEED) -> oracle ==="
-"$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=$EVAL_SEED --fill=0 --policy=off \
-       --trace_out="$OUT/${TAG}_eval" --out_prefix="$OUT/${TAG}_off"
-$PY tools/make_oracle.py --trace="$OUT/${TAG}_eval" --range_size=$RANGE \
-    --slot_s=$SLOT --slot_offset=$WARMUP --out="$OUT/${MODEL_TAG}.oracle.txt"
+make_oracle
 
 else
   echo "=== stages 1-3 skipped (STAGE=$STAGE) ==="
   ALPHA=$(grep -o 'leaper_t1_alpha=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt" | cut -d= -f2)
   BETA=$(grep -o 'leaper_t2_beta=[0-9.e+-]*' "$OUT/${MODEL_TAG}.calibration.txt" | cut -d= -f2)
+  # The oracle is the future of the evaluation traffic, so it belongs to the
+  # evaluation run (TAG, EVAL_SEED, workload), not to the model. A matrix
+  # rerun that asks for the oracle policy either finds one made for exactly
+  # this traffic or makes it now; it never reads one made for other traffic
+  # (M9 review, 2026-09-21, R1).
+  case " ${POLICIES:-off eager_evict incremental_warmup warm_all leaper leaper_p2only oracle} " in
+    *" oracle "*)
+      if [ -f "$OUT/${TAG}.oracle.txt" ]; then
+        if [ ! -f "$OUT/${TAG}.oracle.meta" ] || [ "$(cat "$OUT/${TAG}.oracle.meta")" != "$ORACLE_IDENTITY" ]; then
+          echo "ERROR: $OUT/${TAG}.oracle.txt was made for different traffic:" >&2
+          echo "  have: $(cat "$OUT/${TAG}.oracle.meta" 2>/dev/null || echo '(no .meta)')" >&2
+          echo "  need: $ORACLE_IDENTITY" >&2
+          echo "  delete it to regenerate, or run without the oracle policy" >&2
+          exit 3
+        fi
+      else
+        echo "=== oracle for TAG=$TAG (seed $EVAL_SEED) missing; making it ==="
+        make_oracle
+      fi ;;
+  esac
 fi
 
 echo "=== 4/4 policy matrix (seed $EVAL_SEED) ==="
@@ -123,7 +152,7 @@ for POL in ${POLICIES:-off eager_evict incremental_warmup warm_all leaper leaper
              --leaper_phase1=0 --ssad_miss_threshold=${SSAD_THRESHOLD:-0}
              --ssad_relative=${SSAD_RELATIVE:-0.3} --ssad_window=${SSAD_WINDOW:-5}) ;;
     oracle)
-      EXTRA=(--oracle="$OUT/${MODEL_TAG}.oracle.txt") ;;
+      EXTRA=(--oracle="$OUT/${TAG}.oracle.txt") ;;
   esac
   # macOS ships bash 3.2, where "${EXTRA[@]}" on an empty array trips set -u.
   # Every policy starts from the same database. The workload inserts new keys
