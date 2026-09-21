@@ -897,6 +897,14 @@ which is the next experiment, not a fix.
 
 ### H17 — RocksDB at the paper's scale
 
+> **Seeds (M9, section 4).** Over four more evaluation seeds the three
+> warming policies here are within a third of a point of each other
+> (Leaper +1.65 ± 0.09, `kFlushAndCompaction` +1.39 ± 0.32, `kFlushOnly`
+> +1.38 ± 0.21 over stock; Leaper's paired margin over
+> `kFlushAndCompaction` +0.26 ± 0.30). The ordering stated below is one
+> seed of a spread the size of the differences; Leaper's margin over
+> stock is the most repeatable of the three, nothing more.
+
 H15/H16 ran RocksDB on a 480 MB database, which is not what the paper
 measures. Section 7.3 of the paper uses 10 GB of data, 200-byte records and
 a 4 GB buffer cache of which 3 GB is block cache — a 30% cache-to-data

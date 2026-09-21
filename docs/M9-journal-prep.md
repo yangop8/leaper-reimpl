@@ -1,8 +1,11 @@
 # M9 — Toward the journal version: selective prepopulate on RocksDB, and the FAST'20 workload model
 
-Two of the five items identified as necessary before this work can be
-written up for a journal (the others: a dedicated machine for overhead and
-latency, multi-seed variance, and a decision on phase 1).
+Four of the five items identified as necessary before this work can be
+written up for a journal: selective prepopulate on RocksDB (section 1), a
+workload that is not this repository's generator (section 2), multi-seed
+variance (section 4) and the phase-1 decision (section 5). Section 3
+says where that leaves the claims; the fifth item, a dedicated machine for
+the overhead and latency columns, remains.
 
 ## 1. Selective prepopulate: the paper's mechanism, on RocksDB, at RocksDB's cost
 
