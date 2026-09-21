@@ -38,14 +38,17 @@ def main():
                 rows.setdefault(p, {})[t] = r
     ref = policies[0]
     print(f"\n{'policy':<26} {'seeds':>5} {'hit ratio mean':>14} {'sd':>6} {'min':>8} {'max':>8} "
-          f"{'vs ' + LABEL.get(ref, ref):>22} {'sd':>6} {'min':>8} {'max':>8} {'QPS':>7} {'comps':>7}")
-    print("-" * 132)
+          f"{'vs ' + LABEL.get(ref, ref):>22} {'sd':>6} {'min':>8} {'max':>8} {'QPS':>7} {'comps':>7}"
+          f"  {'p99 us mean':>11} {'sd':>6} {'min':>6} {'max':>6}")
+    print("-" * 166)
     for p in policies:
         got = rows.get(p, {})
         if not got:
             print(f"{LABEL.get(p, p):<26} {'(missing)':>5}")
             continue
         hit = stats([100 * r["hit_ratio"] for r in got.values()])
+        p99 = stats([r["p99"] for r in got.values()])
+        p99s = f"  {p99[0]:>11.0f} {p99[1]:>6.1f} {p99[2]:>6.0f} {p99[3]:>6.0f}"
         qps = sum(r["qps"] for r in got.values()) / len(got)
         comps = sum(r["compactions"] for r in got.values()) / len(got)
         line = (f"{LABEL.get(p, p):<26} {hit[4]:>5} {hit[0]:>13.2f}% {hit[1]:>6.2f} {hit[2]:>7.2f}% {hit[3]:>7.2f}%")
@@ -55,14 +58,15 @@ def main():
             d = stats(diffs)
             if d:
                 sign = "all same sign" if all(x > 0 for x in diffs) or all(x < 0 for x in diffs) else "MIXED SIGN"
-                line += f" {d[0]:>+19.2f}pp {d[1]:>6.2f} {d[2]:>+7.2f} {d[3]:>+7.2f}  {qps:>7.0f} {comps:>7.0f}  {sign}"
+                line += f" {d[0]:>+19.2f}pp {d[1]:>6.2f} {d[2]:>+7.2f} {d[3]:>+7.2f}  {qps:>7.0f} {comps:>7.0f}{p99s}  {sign}"
             else:
                 line += f" {'(no pair)':>22}"
         else:
-            line += f" {'':>22} {'':>6} {'':>8} {'':>8} {qps:>7.0f} {comps:>7.0f}"
+            line += f" {'':>22} {'':>6} {'':>8} {'':>8} {qps:>7.0f} {comps:>7.0f}{p99s}"
         print(line)
     print("\nseeds (tags):", " ".join(tags))
-    print("hit ratio: workload-thread block cache hits / lookups over the measured window, per seed;")
+    print("hit ratio: workload-thread block cache hits / lookups over the measured window, per seed (or per repeat);")
+    print("p99 us: mean of the per-second read p99 over the window, then its spread across the tags.")
     print("margins: per-seed paired differences against the first policy (mean, sample sd, min, max).")
 
 

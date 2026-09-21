@@ -98,6 +98,7 @@ struct Flags {
   double leaper_threshold = 0.5;
   int warm_scan_keys = 4096;
   std::string warm_mode = "iterator";   // or "sst": block-level warming of the job's output files
+  bool direct_reads = false;  // RocksDB use_direct_reads: a block cache miss then costs a device read, not a page-cache hit
   double leaper_max_prefetch_frac = 1.0;  // per-job warm budget as a fraction of the block cache
   bool leaper_dry_run = false;  // predict as usual, warm nothing (Options::dry_run)
   bool leaper_memo = true;      // memoise predictions within a second (Options::memoize_predictions)
@@ -205,6 +206,7 @@ void ParseArgs(int argc, char** argv) {
     else if (ParseFlag(a, "leaper_threshold", &v)) flags.leaper_threshold = ParseDouble("leaper_threshold", v);
     else if (ParseFlag(a, "warm_scan_keys", &v)) flags.warm_scan_keys = ParseInt("warm_scan_keys", v);
     else if (ParseFlag(a, "warm_mode", &v)) flags.warm_mode = v;
+    else if (ParseFlag(a, "direct_reads", &v)) flags.direct_reads = ParseBool("direct_reads", v);
     else if (ParseFlag(a, "leaper_max_prefetch_frac", &v)) flags.leaper_max_prefetch_frac = ParseDouble("leaper_max_prefetch_frac", v);
     else if (ParseFlag(a, "leaper_dry_run", &v)) flags.leaper_dry_run = ParseBool("leaper_dry_run", v);
     else if (ParseFlag(a, "leaper_memo", &v)) flags.leaper_memo = ParseBool("leaper_memo", v);
@@ -415,6 +417,7 @@ int Run() {
   opts.compression = rocksdb::kNoCompression;
   opts.statistics = rocksdb::CreateDBStatistics();
   opts.max_background_jobs = 2;
+  opts.use_direct_reads = flags.direct_reads;
   opts.max_bytes_for_level_base = static_cast<uint64_t>(flags.level_base_mb) * 1024 * 1024;
   opts.max_bytes_for_level_multiplier = 10;
   opts.level0_file_num_compaction_trigger = flags.l0_trigger;
