@@ -490,3 +490,32 @@ since on 40 s lifetimes the models past step 12 are already at precision
 4 MB prefetch row 0.2pp against H14 (7.93 against 8.13): with T2 = 16 s the
 prefetch phase is a union over sixteen models, and the weak far ones admit
 a little noise.
+
+**The 64 MB configuration with a 5 s interval** (`m4_t1_f64_s5`: ten steps,
+T1 = 24 s so k1 = 5-6, T2 = 8.5 s so k2 = 2; no call clamped) is the
+prefetch row the sweep could not give:
+
+| policy | hit ratio | vs stock | blocks warmed in window | prefetch precision |
+|---|---|---|---|---|
+| stock | 81.71% | — | — | — |
+| EagerEvict | 81.11% | -0.61 | — | — |
+| phase 1 alone | 81.29% | -0.43 | — | — |
+| phase 2 alone | 81.64% | -0.08 | 70,505 | 0.20 |
+| both | 81.80% | +0.09 | 69,475 | 0.20 |
+
+Removing the clamp restores the warming (70k blocks against 3.4k) and
+changes nothing else: every policy is within 0.6pp of stock, the floor
+itself is -0.61 — with four compactions in the window the run-to-run
+scale is about half a point, not the 0.3 of the 56-compaction cell — and
+the prefetch precision is 0.20, a fifth of what the same workload gives at
+4 MB files. The reason is the horizon, not the interval: the prefetch
+phase has to predict reads T1 + T2 = 33-40 s ahead, and the hot set's
+lifetime is 40 s, so it is being asked to predict past the point where
+the workload is predictable (the step-7 and step-8 models are at recall
+0.29 and 0.19 offline). A compaction that wipes the cache is the case
+where warming its output would matter most, and it is also the case where
+the output's future is least knowable. For the write-up: **the prefetch
+horizon T1 + T2 must be short against the hot set's lifetime**, which the
+paper's X-Engine setting (compactions of minutes against hot sets of
+hours, by its Table 2) satisfies and a 128 MB cache with 64 MB files does
+not.

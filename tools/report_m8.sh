@@ -160,4 +160,4 @@ echo "-- RocksDB ZippyDB model"; $PY tools/seed_stats.py $OUT off,flush_and_comp
 echo "-- LevelDB NVMe 128 MB (H2)"; $PY tools/seed_stats.py $OUT off,eager_evict,warm_all,leaper_p2only m4_nvme_s1235 m4_nvme_s1236 m4_nvme_s1237 m4_nvme_s1238 | sed -n '3,8p'
 
 sec "M9.4 Phase-1 sweep: H14 base, SST size 4/16/64 MB (T1 2/6/28 s), eviction phase alone and with/without prefetch"
-for T in m4_t1_f4 m4_t1_f16 m4_t1_f64; do echo "-- $T"; grep -h "^\[T1\]" $OUT/$T.calibration.txt; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,8p'; done
+for T in m4_t1_f4 m4_t1_f16 m4_t1_f64 m4_t1_f64_s5; do echo "-- $T"; grep -h "^\[T1\]" $OUT/$T.calibration.txt; $PY tools/summarize_matrix.py $OUT $T 2>/dev/null | grep -v missing | sed -n '3,8p'; done

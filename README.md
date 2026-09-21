@@ -380,11 +380,14 @@ ranges through a DB iterator.
   0.2pp of the re-read path on all three configurations, so no section-H
   RocksDB margin was a cost artefact. The section-H rows are kept as the
   zero-patch result.
-* **The prediction horizon is a fixed number of one-second steps.** A
-  28 s compaction asks the prefetch phase for steps beyond the last model
-  and gets nothing (the core now counts these as clamped predictions). An
-  engine with long compactions needs a coarser statistical interval; that
-  configuration is not measured here.
+* **The prefetch horizon has to be short against the hot set's
+  lifetime.** With 64 MB SSTs a compaction runs 28 s and the prefetch
+  phase must predict 33-40 s ahead on a workload whose hot ranges live
+  40 s: at a 1 s interval the 24-step horizon clamps (the core counts
+  these as clamped predictions), and at a 5 s interval nothing clamps but
+  the prefetch precision falls to 0.20 and no policy is outside the noise
+  (M9, section 5). The paper's setting, compactions of minutes against
+  hot sets of hours, satisfies the condition; this one does not.
 * **Four evaluation seeds per headline cell, on one laptop.** The seed
   spread settles every ordering claimed here except one: at the paper's
   scale on RocksDB the three warming policies are within a third of a point
