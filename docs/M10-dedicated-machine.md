@@ -63,7 +63,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release   # must print "RocksDB 
 cmake --build build -j
 ./build/leaper/mapper_check && ./build/leaper/core_check && ./build/mixgraph_check | tail -3
 ./build/sst_warm_check /tmp/swc && ./build/budget_check /tmp/bc
-./scripts/check_pristine_rocksdb_build.sh && ./scripts/check_run_m4_oracle_binding.sh
+./scripts/check_pristine_rocksdb_build.sh && ./scripts/check_prepop_detection.sh && ./scripts/check_run_m4_oracle_binding.sh && ./scripts/check_oracle_offset.sh && ./scripts/check_chain_suffixes.sh
 ```
 
 Every check must print PASS before any experiment. `pread_env.h` has a

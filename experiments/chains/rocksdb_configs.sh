@@ -11,11 +11,14 @@
 set -eu
 cd "$(dirname "$0")/../.."
 ROOT=${LEAPER_DB_ROOT:-/tmp/leaper_dbs}; mkdir -p "$ROOT"
-SUF=${TAG_SUFFIX:-}; MSUF=${MODEL_TAG_SUFFIX:-$SUF}
+# "-" not ":-": an explicitly empty MODEL_TAG_SUFFIX means "the unsuffixed
+# model" (repeat runs write to _rN and reuse it), only an unset one follows TAG.
+SUF=${TAG_SUFFIX:-}; MSUF=${MODEL_TAG_SUFFIX-$SUF}
+RUN_M7=${RUN_M7:-./experiments/run_m7.sh}
 P=${POLICIES:-"off flush_only flush_and_compaction prepop_leaper"}
 RDB="NUM_KEYS=50000000 VALUE_SIZE=184 CACHE_MB=3072 WRITE_BUFFER_MB=16 L0_TRIGGER=4 LEVEL_BASE_MB=256 MAX_FILE_MB=64 OP_RATE=${OP_RATE:-60000} DURATION=200"
 IM="KEY_DIST=zipf ZIPF=0.9 READ_RATIO=0.40 UPDATE_RATIO=0.60 WRITE_RATE=0 RANGE_SIZE=2000"
-run(){ env LEAPER_DB=$ROOT/$1 TAG=$2$SUF MODEL_TAG=$2$MSUF STAGE=${STAGE:-all} EVAL_SEED=${EVAL_SEED:-1234} POLICIES="$P" EXTRA_ARGS="${EXTRA:-}" "${@:3}" ./experiments/run_m7.sh; }
+run(){ env LEAPER_DB=$ROOT/$1 TAG=$2$SUF MODEL_TAG=$2$MSUF STAGE=${STAGE:-all} EVAL_SEED=${EVAL_SEED:-1234} POLICIES="$P" EXTRA_ARGS="${EXTRA:-}" "${@:3}" "$RUN_M7"; }
 for C in ${CONFIGS:-paper im10g im8m zippy}; do
   case $C in
     paper) run m7paper_db m7paper3 $RDB RANGE_SIZE=100000 WRITE_RATE=15000 LIFETIME_S=60 ;;

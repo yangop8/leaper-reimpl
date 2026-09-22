@@ -552,3 +552,26 @@ are fixed, each with an acceptance check.
 * **R3 — two labels called the RocksDB ZippyDB cache 3 GB.** It is 256 MB
   (section 2 and the calibration file agree); README and the section-3
   table are corrected.
+
+**Follow-up (2026-09-22,
+[`docs/code-review-m9-followup-2026-09-22.md`](code-review-m9-followup-2026-09-22.md)).**
+R1 and R3 closed; R2's build fix held but left three script-level defects,
+all fixed with an acceptance check each:
+
+* **F1** — the patch probe's result lived in the CMake cache, so applying
+  the patch after a first configure and reconfiguring the same build
+  directory kept "absent". The probe now lives in
+  `cmake/DetectPrepopFilter.cmake` and is re-run on every configure;
+  `scripts/check_prepop_detection.sh` configures one build directory
+  unpatched, patched, unpatched and expects absent, present, absent.
+* **F2** — `rocksdb_configs.sh` treated an explicitly empty
+  `MODEL_TAG_SUFFIX` as unset, so the M10 repeat runs would have looked for
+  a model named after their own result tag. `${VAR-default}` instead of
+  `${VAR:-default}`; `scripts/check_chain_suffixes.sh` covers empty, unset
+  and named suffixes and the repeat composition.
+* **F3** — `make_oracle.py` took the warmup as a count of intervals, which
+  was only right at a one-second slot: at `SLOT_S=5` every oracle slot was
+  120 s late. It now takes `--warmup_s` and adds it to the timestamps before
+  binning, for any slot width; `scripts/check_oracle_offset.sh` pins slots
+  of 1, 5 and 7 s. No reported result used a non-1 s oracle (the 5 s sweep
+  ran no oracle policy); the stale file was deleted.

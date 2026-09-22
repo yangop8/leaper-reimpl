@@ -7,11 +7,13 @@ given the ranges that will actually be read in the next interval. Without it,
 achievable or a tenth of it.
 
 The trace's clock starts at the measurement window; the plug-in's clock starts
-at the run, so --slot_offset shifts by the warmup.
+at the run, so --warmup_s adds the warmup to every timestamp before binning
+(a slot offset in intervals, the earlier interface, was only right when the
+slot was one second: at 5 s slots it shifted the oracle by 120 s).
 
 Usage:
   python3 tools/make_oracle.py --trace=<prefix> --range_size=40000 \
-      --slot_s=1 --slot_offset=30 --out=<prefix>.oracle.txt
+      --slot_s=1 --warmup_s=30 --out=<prefix>.oracle.txt
 """
 
 import argparse
@@ -26,9 +28,11 @@ def main():
     ap.add_argument("--trace", required=True)
     ap.add_argument("--range_size", type=int, required=True)
     ap.add_argument("--slot_s", type=float, default=1.0)
+    ap.add_argument("--warmup_s", type=float, default=0.0,
+                    help="seconds the plug-in's clock was already running when the "
+                         "trace's clock started (the warmup); added before binning")
     ap.add_argument("--slot_offset", type=int, default=0,
-                    help="intervals to add so trace time matches plug-in time "
-                         "(normally warmup / slot_s)")
+                    help="legacy: whole intervals to add after binning; prefer --warmup_s")
     ap.add_argument("--lookahead", type=int, default=1,
                     help="hot set for interval s is the union of intervals s..s+W-1. "
                          "W=1 is the paper's prediction target; larger W approaches "
@@ -54,7 +58,8 @@ def main():
     op = np.concatenate(op_all)
 
     is_read = (op == 0) | (op == 3)
-    slot = (t_ms[is_read] // int(args.slot_s * 1000)).astype(np.int64) + args.slot_offset
+    shifted = t_ms[is_read] + int(round(args.warmup_s * 1000))
+    slot = (shifted // int(args.slot_s * 1000)).astype(np.int64) + args.slot_offset
     rid = key[is_read] // args.range_size
 
     order = np.lexsort((rid, slot))

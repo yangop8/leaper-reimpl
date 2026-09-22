@@ -68,7 +68,7 @@ make_oracle() {
   "$BIN" --db="$DB" "${WORKLOAD[@]}" --seed=$EVAL_SEED --fill=0 --policy=off \
          --trace_out="$OUT/${TAG}_eval" --out_prefix="$OUT/${TAG}_off"
   $PY tools/make_oracle.py --trace="$OUT/${TAG}_eval" --range_size=$RANGE \
-      --slot_s=$SLOT --slot_offset=$WARMUP --out="$OUT/${TAG}.oracle.txt"
+      --slot_s=$SLOT --warmup_s=$WARMUP --out="$OUT/${TAG}.oracle.txt"
   echo "$ORACLE_IDENTITY" > "$OUT/${TAG}.oracle.meta"
 }
 

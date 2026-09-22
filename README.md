@@ -323,11 +323,15 @@ Five tests are load-bearing rather than decorative:
   with `PerfContext` on, require zero block reads from the file. This is what
   lets the RocksDB adapter warm at block granularity with no patch
   (`--warm_mode=sst`).
-* Two script-level checks from the M9 review:
+* Five script-level checks from the M9 review rounds:
   `scripts/check_pristine_rocksdb_build.sh` (the adapter and bench compile
   against an unpatched RocksDB 11.8; only `warm_mode=prepop` needs the
-  patch) and `scripts/check_run_m4_oracle_binding.sh` (a matrix rerun under
-  a new evaluation seed makes its own oracle or refuses a mismatched one).
+  patch), `scripts/check_prepop_detection.sh` (the patch probe follows the
+  header, not the CMake cache), `scripts/check_run_m4_oracle_binding.sh` (a
+  matrix rerun under a new evaluation seed makes its own oracle or refuses
+  a mismatched one), `scripts/check_oracle_offset.sh` (the oracle's warmup
+  shift is right at any slot width) and `scripts/check_chain_suffixes.sh`
+  (repeat runs reuse the unsuffixed model).
 * **`budget_check`** (RocksDB) pins the per-job warm budget on the case that
   slipped past three revisions of it: a file in which the predicted ranges
   have no keys, where a Seek reads a block without the scan loop ever
